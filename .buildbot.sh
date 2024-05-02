@@ -83,6 +83,7 @@ PATH=${YKB_YKLLVM_BIN_DIR}:${PATH} cargo xtask cfmt
 git diff --exit-code --ignore-submodules
 
 cargo install cargo-diff-tools
+git fetch origin master:refs/remotes/origin/master
 for tracer in ${TRACERS}; do
     export YKB_TRACER="${tracer}"
     # Check for annoying compiler warnings in each package.
@@ -103,6 +104,7 @@ for tracer in ${TRACERS}; do
 
     # Error if Clippy detects any warnings introduced in lines changed in this PR.
     cargo-clippy-diff origin/master -- --all-features -- -D warnings
+    exit 1
 
     # There are some feature-gated testing/debugging switches which slow the JIT
     # down a bit. Check that if we build the system without tests, those features
