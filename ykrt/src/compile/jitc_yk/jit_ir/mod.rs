@@ -1133,7 +1133,7 @@ impl fmt::Display for DisplayableInst<'_> {
                 write!(
                     f,
                     "icall {}({})",
-                    inst.target.unpack().display(self.m),
+                    inst.target().display(self.m),
                     (0..inst.num_args())
                         .map(|y| format!("{}", inst.operand(self.m, y).display(self.m)))
                         .collect::<Vec<_>>()
@@ -1155,8 +1155,8 @@ impl fmt::Display for DisplayableInst<'_> {
             Inst::Store(x) => write!(
                 f,
                 "*{} = {}",
-                x.tgt.unpack().display(self.m),
-                x.val.unpack().display(self.m)
+                x.tgt().display(self.m),
+                x.val().display(self.m)
             ),
             Inst::Icmp(x) => write!(
                 f,
@@ -1239,24 +1239,20 @@ inst!(Trunc, TruncInst);
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BinOpInst {
     /// The left-hand side of the operation.
-    lhs: PackedOperand,
+    pub(crate) lhs: Operand,
     /// The operation to perform.
     pub(crate) binop: BinOp,
     /// The right-hand side of the operation.
-    rhs: PackedOperand,
+    pub(crate) rhs: Operand,
 }
 
 impl BinOpInst {
     pub(crate) fn new(lhs: Operand, binop: BinOp, rhs: Operand) -> Self {
-        Self {
-            lhs: PackedOperand::new(&lhs),
-            binop,
-            rhs: PackedOperand::new(&rhs),
-        }
+        Self { lhs, binop, rhs }
     }
 
     pub(crate) fn lhs(&self) -> Operand {
-        self.lhs.unpack()
+        self.lhs.clone()
     }
 
     pub(crate) fn binop(&self) -> BinOp {
@@ -1264,12 +1260,12 @@ impl BinOpInst {
     }
 
     pub(crate) fn rhs(&self) -> Operand {
-        self.rhs.unpack()
+        self.rhs.clone()
     }
 
     /// Returns the type index of the operands being added.
     pub(crate) fn ty_idx(&self, m: &Module) -> TyIdx {
-        self.lhs.unpack().ty_idx(m)
+        self.lhs.ty_idx(m)
     }
 }
 
@@ -1279,19 +1275,19 @@ impl BinOpInst {
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlackBoxInst {
-    op: PackedOperand,
+    op: Operand,
 }
 
 #[cfg(test)]
 impl BlackBoxInst {
     pub(crate) fn new(op: Operand) -> BlackBoxInst {
         Self {
-            op: PackedOperand::new(&op),
+            op
         }
     }
 
     pub(crate) fn operand(&self) -> Operand {
-        self.op.unpack()
+        self.op.clone()
     }
 }
 
@@ -1304,7 +1300,7 @@ impl BlackBoxInst {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadInst {
     /// The pointer to load from.
-    op: PackedOperand,
+    op: Operand,
     /// The type of the pointee.
     ty_idx: TyIdx,
 }
@@ -1313,14 +1309,14 @@ impl LoadInst {
     // FIXME: why do we need to provide a type index? Can't we get that from the operand?
     pub(crate) fn new(op: Operand, ty_idx: TyIdx) -> LoadInst {
         LoadInst {
-            op: PackedOperand::new(&op),
+            op,
             ty_idx,
         }
     }
 
     /// Return the pointer operand.
     pub(crate) fn operand(&self) -> Operand {
-        self.op.unpack()
+        self.op.clone()
     }
 
     /// Returns the type index of the loaded value.
@@ -1419,7 +1415,7 @@ impl LookupGlobalInst {
 #[derive(Clone, Debug, PartialEq)]
 pub struct IndirectCallInst {
     /// The callee.
-    target: PackedOperand,
+    target: Operand,
     // Type of the target function.
     fty_idx: TyIdx,
     /// How many arguments in [Module::extra_args] is this call passing?
@@ -1444,7 +1440,7 @@ impl IndirectCallInst {
         })?;
         let args_idx = m.push_args(args)?;
         Ok(Self {
-            target: PackedOperand::new(&target),
+            target,
             fty_idx,
             num_args,
             args_idx,
@@ -1458,7 +1454,7 @@ impl IndirectCallInst {
 
     /// Return the callee [Operand].
     pub(crate) fn target(&self) -> Operand {
-        self.target.unpack()
+        self.target.clone()
     }
 
     /// How many arguments is this call instruction passing?
@@ -1549,28 +1545,28 @@ impl DirectCallInst {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoreInst {
     /// The target pointer that we will store `val` into.
-    tgt: PackedOperand,
+    tgt: Operand,
     /// The value to store.
-    val: PackedOperand,
+    val: Operand,
 }
 
 impl StoreInst {
     pub(crate) fn new(tgt: Operand, val: Operand) -> Self {
         // FIXME: assert type of pointer
         Self {
-            tgt: PackedOperand::new(&tgt),
-            val: PackedOperand::new(&val),
+            tgt,
+            val
         }
     }
 
     /// Returns the value operand: i.e. the thing that is going to be stored.
     pub(crate) fn val(&self) -> Operand {
-        self.val.unpack()
+        self.val.clone()
     }
 
     /// Returns the target operand: i.e. where to store [self.val()].
     pub(crate) fn tgt(&self) -> Operand {
-        self.tgt.unpack()
+        self.tgt.clone()
     }
 }
 
@@ -1584,10 +1580,9 @@ impl StoreInst {
 /// Following LLVM semantics, the operation is permitted to silently wrap if the result doesn't fit
 /// in the LLVM pointer indexing type.
 #[derive(Clone, Debug, PartialEq)]
-#[repr(packed)]
 pub struct PtrAddInst {
     /// The pointer to offset
-    ptr: PackedOperand,
+    ptr: Operand,
     /// The constant byte offset.
     ///
     /// Depending upon the platform, LLVM `getelementptr` may allow larger offsets than what this
@@ -1599,14 +1594,13 @@ pub struct PtrAddInst {
 impl PtrAddInst {
     pub(crate) fn new(ptr: Operand, off: i32) -> Self {
         Self {
-            ptr: PackedOperand::new(&ptr),
+            ptr,
             off,
         }
     }
 
     pub(crate) fn ptr(&self) -> Operand {
-        let ptr = self.ptr;
-        ptr.unpack()
+        self.ptr.clone()
     }
 
     pub(crate) fn off(&self) -> i32 {
@@ -1627,12 +1621,11 @@ impl PtrAddInst {
 /// Following LLVM semantics, the operation is permitted to silently wrap if the result doesn't fit
 /// in the LLVM pointer indexing type.
 #[derive(Clone, Debug, PartialEq)]
-#[repr(packed)]
 pub struct DynPtrAddInst {
     /// The pointer to offset
-    ptr: PackedOperand,
+    ptr: Operand,
     /// The (dynamic) number of elements.
-    num_elems: PackedOperand,
+    num_elems: Operand,
     /// The element size.
     ///
     /// Depending upon the platform, LLVM `getelementptr` may allow larger element sizes than what
@@ -1644,15 +1637,14 @@ pub struct DynPtrAddInst {
 impl DynPtrAddInst {
     pub(crate) fn new(ptr: Operand, num_elems: Operand, elem_size: u16) -> Self {
         Self {
-            ptr: PackedOperand::new(&ptr),
+            ptr,
             elem_size,
-            num_elems: PackedOperand::new(&num_elems),
+            num_elems
         }
     }
 
     pub(crate) fn ptr(&self) -> Operand {
-        let ptr = self.ptr;
-        ptr.unpack()
+        self.ptr.clone()
     }
 
     pub(crate) fn elem_size(&self) -> u16 {
@@ -1660,8 +1652,7 @@ impl DynPtrAddInst {
     }
 
     pub(crate) fn num_elems(&self) -> Operand {
-        let num_elems = self.num_elems;
-        num_elems.unpack()
+        self.num_elems.clone()
     }
 }
 
@@ -1674,17 +1665,17 @@ impl DynPtrAddInst {
 ///
 #[derive(Clone, Debug, PartialEq)]
 pub struct IcmpInst {
-    lhs: PackedOperand,
+    lhs: Operand,
     pred: Predicate,
-    rhs: PackedOperand,
+    rhs: Operand,
 }
 
 impl IcmpInst {
     pub(crate) fn new(lhs: Operand, pred: Predicate, rhs: Operand) -> Self {
         Self {
-            lhs: PackedOperand::new(&lhs),
+            lhs,
             pred,
-            rhs: PackedOperand::new(&rhs),
+            rhs,
         }
     }
 
@@ -1692,14 +1683,14 @@ impl IcmpInst {
     ///
     /// E.g. in `x <= y`, it's `x`.
     pub(crate) fn lhs(&self) -> Operand {
-        self.lhs.unpack()
+        self.lhs.clone()
     }
 
     /// Returns the right-hand-side of the comparison.
     ///
     /// E.g. in `x <= y`, it's `y`.
     pub(crate) fn rhs(&self) -> Operand {
-        self.rhs.unpack()
+        self.rhs.clone()
     }
 
     /// Returns the predicate of the comparison.
@@ -1721,7 +1712,7 @@ impl IcmpInst {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GuardInst {
     /// The condition to guard against.
-    cond: PackedOperand,
+    cond: Operand,
     /// The expected outcome of the condition.
     expect: bool,
     /// Additional information about this guard.
@@ -1731,14 +1722,14 @@ pub struct GuardInst {
 impl GuardInst {
     pub(crate) fn new(cond: Operand, expect: bool, gidx: GuardInfoIdx) -> Self {
         GuardInst {
-            cond: PackedOperand::new(&cond),
+            cond,
             expect,
             gidx,
         }
     }
 
     pub(crate) fn cond(&self) -> Operand {
-        self.cond.unpack()
+        self.cond.clone()
     }
 
     pub(crate) fn expect(&self) -> bool {
@@ -1753,7 +1744,7 @@ impl GuardInst {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SExtInst {
     /// The value to extend.
-    val: PackedOperand,
+    val: Operand,
     /// The type to extend to.
     dest_ty_idx: TyIdx,
 }
@@ -1761,13 +1752,13 @@ pub struct SExtInst {
 impl SExtInst {
     pub(crate) fn new(val: &Operand, dest_ty_idx: TyIdx) -> Self {
         Self {
-            val: PackedOperand::new(val),
+            val: val.clone(),
             dest_ty_idx,
         }
     }
 
     pub(crate) fn val(&self) -> Operand {
-        self.val.unpack()
+        self.val.clone()
     }
 
     pub(crate) fn dest_ty_idx(&self) -> TyIdx {
@@ -1778,7 +1769,7 @@ impl SExtInst {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ZeroExtendInst {
     /// The value to extend.
-    val: PackedOperand,
+    val: Operand,
     /// The type to extend to.
     dest_ty_idx: TyIdx,
 }
@@ -1786,13 +1777,13 @@ pub struct ZeroExtendInst {
 impl ZeroExtendInst {
     pub(crate) fn new(val: &Operand, dest_ty_idx: TyIdx) -> Self {
         Self {
-            val: PackedOperand::new(val),
+            val: val.clone(),
             dest_ty_idx,
         }
     }
 
     pub(crate) fn val(&self) -> Operand {
-        self.val.unpack()
+        self.val.clone()
     }
 
     pub(crate) fn dest_ty_idx(&self) -> TyIdx {
@@ -1803,7 +1794,7 @@ impl ZeroExtendInst {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TruncInst {
     /// The value to extend.
-    val: PackedOperand,
+    val: Operand,
     /// The type to extend to.
     dest_ty_idx: TyIdx,
 }
@@ -1811,13 +1802,13 @@ pub struct TruncInst {
 impl TruncInst {
     pub(crate) fn new(val: &Operand, dest_ty_idx: TyIdx) -> Self {
         Self {
-            val: PackedOperand::new(val),
+            val: val.clone(),
             dest_ty_idx,
         }
     }
 
     pub(crate) fn val(&self) -> Operand {
-        self.val.unpack()
+        self.val.clone()
     }
 
     pub(crate) fn dest_ty_idx(&self) -> TyIdx {
@@ -1871,6 +1862,7 @@ mod tests {
     /// Ensure that any given instruction fits in 64-bits.
     #[test]
     fn inst_size() {
+        println!("{} (should be {})", mem::size_of::<Inst>(), mem::size_of::<u64>());
         assert!(mem::size_of::<Inst>() <= mem::size_of::<u64>());
     }
 

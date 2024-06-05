@@ -14,17 +14,18 @@ use crate::compile::{
 pub(super) fn simple(mut m: Module) -> Result<Module, CompilationError> {
     for inst_i in m.iter_inst_idxs() {
         match m.inst(inst_i).clone() {
-            Inst::BinOp(x) if x.binop() == BinOp::Mul => {
-                if let (Operand::Local(_), Operand::Const(c_idx)) = (x.lhs(), x.rhs()) {
-                    let old_const = m.const_(c_idx);
-                    if let Some(y) = old_const.int_to_i64() {
-                        if y % 2 == 0 {
-                            let shl = i64::from(y.ilog2());
-                            let new_const =
-                                Operand::Const(m.insert_const(old_const.i64_to_int(shl))?);
-                            let new_inst = BinOpInst::new(x.lhs(), BinOp::Shl, new_const).into();
-                            m.replace(inst_i, new_inst);
-                        }
+            Inst::BinOp(BinOpInst {
+                lhs: lhs @ Operand::Local(_),
+                binop: BinOp::Mul,
+                rhs: Operand::Const(c_idx),
+            }) => {
+                let old_const = m.const_(c_idx);
+                if let Some(y) = old_const.int_to_i64() {
+                    if y % 2 == 0 {
+                        let shl = i64::from(y.ilog2());
+                        let new_const = Operand::Const(m.insert_const(old_const.i64_to_int(shl))?);
+                        let new_inst = BinOpInst::new(lhs, BinOp::Shl, new_const).into();
+                        m.replace(inst_i, new_inst);
                     }
                 }
             }
