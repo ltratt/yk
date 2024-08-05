@@ -777,11 +777,11 @@ impl<'a> Assemble<'a> {
                 VarLocation::Register(reg_alloc::Register::GP(Rq::R15))
             }
             yksmp::Location::Direct(6, off, size) => VarLocation::Direct {
-                frame_off: *off,
+                frame_off: off.abs(),
                 size: usize::from(*size),
             },
             yksmp::Location::Indirect(6, off, size) => VarLocation::Indirect {
-                frame_off: *off,
+                frame_off: off.abs(),
                 size: usize::from(*size),
             },
             e => {
@@ -790,79 +790,56 @@ impl<'a> Assemble<'a> {
         };
         match self.m.type_(inst.tyidx()) {
             Ty::Integer(_) | Ty::Ptr => {
-                let [tgt_reg] = self.ra.get_gp_regs_avoiding(
-                    &mut self.asm,
-                    iidx,
-                    [RegConstraint::Output],
-                    RegSet::from_vec(&STACKMAP_GP_REGS),
-                );
                 let size = self.m.inst_no_proxies(iidx).def_byte_size(self.m);
                 debug_assert!(size <= REG64_SIZE);
-
                 match m {
                     VarLocation::Register(reg_alloc::Register::GP(reg)) => {
-                        // FIXME: Map this iidx to `reg` without this `mov`. Requires way to
-                        // initialise register allocator with existing values.
-                        dynasm!(self.asm; mov Rq(tgt_reg.code()), Rq(reg.code()));
+                        self.ra.force_assign_inst_gp_reg(iidx, reg);
                     }
                     VarLocation::Register(reg_alloc::Register::FP(_)) => {
                         // The value is a integer and thus can't be stored in a float register.
                         panic!()
                     }
-                    VarLocation::Direct { frame_off, size } => {
-                        // FIXME If we prime the register allocator with the interpreter frames
-                        // stack size and don't create a new frame in the trace epilogue we can
-                        // reference values directly using the current RBP value.
-                        match size {
-                            8 => dynasm!(self.asm
-                                ; mov Rq(tgt_reg.code()), QWORD [Rq(Rq::RBP.code())]
-                                ; lea Rq(tgt_reg.code()), [Rq(tgt_reg.code()) + frame_off]
-                            ),
-                            _ => panic!(),
-                        }
+                    VarLocation::Direct { frame_off, size: _ } => {
+                        self.ra.force_assign_inst_direct(iidx, frame_off);
                     }
-                    VarLocation::Indirect { frame_off, size } => {
-                        dynasm!(self.asm; mov Rq(tgt_reg.code()), QWORD [Rq(Rq::RBP.code())]);
-                        match size {
-                            8 => {
-                                dynasm!(self.asm; mov Rq(tgt_reg.code()), [Rq(tgt_reg.code()) + frame_off])
-                            }
-                            _ => todo!(),
-                        }
+                    VarLocation::Indirect { frame_off, size: _ } => {
+                        self.ra.force_assign_inst_indirect(iidx, frame_off);
                     }
                     _ => panic!(),
                 }
             }
             Ty::Float(_fty) => {
-                let [tgt_reg] = self
-                    .ra
-                    .get_fp_regs(&mut self.asm, iidx, [RegConstraint::Output]);
-                let size = self.m.inst_no_proxies(iidx).def_byte_size(self.m);
-                debug_assert!(size <= REG64_SIZE);
-
-                match m {
-                    VarLocation::Register(reg_alloc::Register::FP(reg)) => {
-                        // FIXME: Map this iidx to `reg` without this `mov`. Requires way to
-                        // initialise register allocator with existing values.
-                        dynasm!(self.asm; movss Rx(tgt_reg.code()), Rx(reg.code()));
-                    }
-                    VarLocation::Register(reg_alloc::Register::GP(_)) => {
-                        // The value is a float and thus can't be stored in a normal register.
-                        panic!()
-                    }
-                    VarLocation::Direct {
-                        size, frame_off, ..
-                    } => match size {
-                        4 => dynasm!(self.asm; movss Rx(tgt_reg.code()), [rbp - frame_off]),
-                        8 => dynasm!(self.asm; movsd Rx(tgt_reg.code()), [rbp - frame_off]),
-                        _ => unreachable!(),
-                    },
-                    VarLocation::Indirect { .. } => {
-                        // The value is a pointer and thus can't be of type float.
-                        panic!()
-                    }
-                    x => todo!("{x:?}"),
-                }
+                todo!();
+                // let [tgt_reg] = self
+                //     .ra
+                //     .get_fp_regs(&mut self.asm, iidx, [RegConstraint::Output]);
+                // let size = self.m.inst_no_proxies(iidx).def_byte_size(self.m);
+                // debug_assert!(size <= REG64_SIZE);
+                //
+                // match m {
+                //     VarLocation::Register(reg_alloc::Register::FP(reg)) => {
+                //         // FIXME: Map this iidx to `reg` without this `mov`. Requires way to
+                //         // initialise register allocator with existing values.
+                //         dynasm!(self.asm; movss Rx(tgt_reg.code()), Rx(reg.code()));
+                //     }
+                //     VarLocation::Register(reg_alloc::Register::GP(_)) => {
+                //         // The value is a float and thus can't be stored in a normal register.
+                //         panic!()
+                //     }
+                //     VarLocation::Direct {
+                //         size, frame_off, ..
+                //     } => match size {
+                //         4 => dynasm!(self.asm; movss Rx(tgt_reg.code()), [rbp - frame_off]),
+                //         8 => dynasm!(self.asm; movsd Rx(tgt_reg.code()), [rbp - frame_off]),
+                //         _ => unreachable!(),
+                //     },
+                //     VarLocation::Indirect { .. } => {
+                //         // The value is a pointer and thus can't be of type float.
+                //         panic!()
+                //     }
+                //     x => todo!("{x:?}"),
+                // }
             }
             Ty::Func(_) | Ty::Void | Ty::Unimplemented(_) => unreachable!(),
         }
