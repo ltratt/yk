@@ -10,6 +10,7 @@
 
 use super::{
     super::{
+        int_signs::{SignExtend, Truncate},
         jit_ir::{self, BinOp, FloatTy, InstIdx, Module, Operand, Ty},
         CompilationError,
     },
@@ -420,6 +421,27 @@ impl<'a> Assemble<'a> {
         match inst.binop() {
             BinOp::Add => {
                 let size = lhs.byte_size(self.m);
+                match (&lhs, &rhs) {
+                    (Operand::Const(cidx), Operand::Var(_))
+                    | (Operand::Var(_), Operand::Const(cidx)) => {
+                        let Const::Int(_, v) = self.m.const_(*cidx) else {
+                            unreachable!()
+                        };
+                        let bits = u32::try_from(size).unwrap() * 8;
+                        if bits <= 32 || v.truncate(32).sign_extend(32) == *v {
+                            let v2 = if bits <= 32 { v.sign_extend(bits) } else { v.truncate(32).sign_extend(bits) };
+                            let [lhs_reg] = self.ra.assign_gp_regs(
+                                &mut self.asm,
+                                iidx,
+                                [RegConstraint::InputOutput(lhs)],
+                            );
+                            dynasm!(self.asm; add Rq(lhs_reg.code()), v2 as i32);
+                            return;
+                        }
+                    }
+                    _ => (),
+                }
+
                 let [lhs_reg, rhs_reg] = self.ra.assign_gp_regs(
                     &mut self.asm,
                     iidx,

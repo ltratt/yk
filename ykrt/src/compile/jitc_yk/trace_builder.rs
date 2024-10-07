@@ -1037,6 +1037,7 @@ impl TraceBuilder {
                             )),
                             x => todo!("{x}"),
                         };
+                        println!("promote {v}");
                         self.promote_idx += width_bytes;
                         Const::Int(ty, v)
                     }
