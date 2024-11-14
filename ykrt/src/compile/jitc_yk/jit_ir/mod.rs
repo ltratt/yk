@@ -161,6 +161,8 @@ pub(crate) struct Module {
     loop_start_vars: Vec<Operand>,
     /// Live variables at the end of the loop.
     loop_jump_vars: Vec<Operand>,
+    /// Live variables at the beginning of this trace.
+    trace_entry_vars: Vec<Operand>,
     /// Live variables at the beginning of the root trace.
     root_entry_vars: Vec<VarLocation>,
     /// The virtual address of the global variable pointer array.
@@ -256,6 +258,7 @@ impl Module {
             indirect_calls: Vec::new(),
             loop_start_vars: Vec::new(),
             loop_jump_vars: Vec::new(),
+            trace_entry_vars: Vec::new(),
             root_entry_vars: Vec::new(),
             #[cfg(not(test))]
             globalvar_ptrs,
@@ -595,6 +598,10 @@ impl Module {
         GuardInfoIdx::try_from(self.guard_info.len()).inspect(|_| self.guard_info.push(info))
     }
 
+    pub(crate) fn trace_entry_vars(&self) -> &[Operand] {
+        &self.trace_entry_vars
+    }
+
     pub(crate) fn loop_start_vars(&self) -> &[Operand] {
         &self.loop_start_vars
     }
@@ -896,7 +903,7 @@ index_16bit!(ArgsIdx);
 /// A constant index.
 ///
 /// One of these is an index into the [Module::consts].
-#[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd)]
 pub(crate) struct ConstIdx(u16);
 index_16bit!(ConstIdx);
 
@@ -1168,7 +1175,7 @@ impl PackedOperand {
 }
 
 /// An operand.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Operand {
     /// This operand references another SSA variable.
     Var(InstIdx),
@@ -1436,6 +1443,8 @@ pub(crate) enum Inst {
     Store(StoreInst),
     ICmp(ICmpInst),
     Guard(GuardInst),
+    /// Marks the point where side-traces reenter the root trace.
+    TraceReentryPoint,
     /// Marks the place to loop back to at the end of the JITted code.
     TraceLoopStart,
     TraceLoopJump,
@@ -1490,6 +1499,7 @@ impl Inst {
             Self::Store(..) => m.void_tyidx(),
             Self::ICmp(_) => m.int1_tyidx(),
             Self::Guard(..) => m.void_tyidx(),
+            Self::TraceReentryPoint => m.void_tyidx(),
             Self::TraceLoopStart => m.void_tyidx(),
             Self::TraceLoopJump => m.void_tyidx(),
             Self::RootJump => m.void_tyidx(),
@@ -1536,7 +1546,10 @@ impl Inst {
             Inst::Copy(x) => m.inst_raw(*x).is_barrier(m),
             Inst::Guard(_) => true,
             Inst::Call(_) | Inst::IndirectCall(_) => true,
-            Inst::TraceLoopStart | Inst::TraceLoopJump | Inst::RootJump => true,
+            Inst::TraceReentryPoint
+            | Inst::TraceLoopStart
+            | Inst::TraceLoopJump
+            | Inst::RootJump => true,
             _ => false,
         }
     }
@@ -1598,6 +1611,11 @@ impl Inst {
                 cond.unpack(m).map_iidx(f);
                 for (_, pop) in x.guard_info(m).live_vars() {
                     pop.unpack(m).map_iidx(f);
+                }
+            }
+            Inst::TraceReentryPoint => {
+                for x in &m.trace_entry_vars {
+                    x.map_iidx(f);
                 }
             }
             Inst::TraceLoopStart => {
@@ -1702,6 +1720,14 @@ impl Inst {
                     pop.map_iidx(f);
                 }
             }
+            Inst::TraceReentryPoint => {
+                for val in &m.trace_entry_vars {
+                    match val {
+                        Operand::Var(iidx) => f(*iidx),
+                        _ => panic!(),
+                    }
+                }
+            }
             Inst::TraceLoopStart => {
                 for val in &m.loop_start_vars {
                     match val {
@@ -1748,6 +1774,173 @@ impl Inst {
             Inst::FPToSI(FPToSIInst { val, .. }) => val.map_iidx(f),
             Inst::FNeg(FNegInst { val }) => val.map_iidx(f),
         }
+    }
+
+    /// Duplicate this [Inst] while applying function `f` to each operand.
+    pub(crate) fn dup_and_remap_locals<F>(
+        &self,
+        m: &mut Module,
+        f: &F,
+    ) -> Result<Self, CompilationError>
+    where
+        F: Fn(InstIdx, &Module) -> InstIdx,
+    {
+        let mapper = |x: &PackedOperand, m: &Module| match x.unpack(m) {
+            Operand::Var(iidx) => PackedOperand::new(&Operand::Var(f(iidx, m))),
+            Operand::Const(_) => *x,
+        };
+        let op_mapper = |x: &Operand, m: &Module| match x {
+            Operand::Var(iidx) => Operand::Var(f(*iidx, m)),
+            Operand::Const(c) => Operand::Const(*c),
+        };
+        let inst = match self {
+            #[cfg(test)]
+            Inst::BlackBox(BlackBoxInst { op }) => {
+                Inst::BlackBox(BlackBoxInst { op: mapper(op, m) })
+            }
+            Inst::BinOp(BinOpInst { lhs, binop, rhs }) => Inst::BinOp(BinOpInst {
+                lhs: mapper(lhs, m),
+                binop: *binop,
+                rhs: mapper(rhs, m),
+            }),
+            Inst::Call(dc) => {
+                // Clone and map arguments.
+                let args = (0..(dc.num_args()))
+                    .map(|i| op_mapper(&dc.operand(m, i), m))
+                    .collect::<Vec<_>>();
+                let dc = DirectCallInst::new(m, dc.target, args)?;
+                Inst::Call(dc)
+            }
+            Inst::IndirectCall(iidx) => {
+                let ic = m.indirect_call(*iidx);
+                // Clone and map arguments.
+                let args = (0..(ic.num_args()))
+                    .map(|i| op_mapper(&ic.operand(m, i), m))
+                    .collect::<Vec<_>>();
+                let icnew = IndirectCallInst::new(m, ic.ftyidx, op_mapper(&ic.target(m), m), args)?;
+                let idx = m.push_indirect_call(icnew)?;
+                Inst::IndirectCall(idx)
+            }
+            Inst::Const(c) => Inst::Const(*c),
+            Inst::Copy(iidx) => Inst::Copy(f(*iidx, m)),
+            Inst::DynPtrAdd(inst) => {
+                let ptr = inst.ptr;
+                let num_elems = inst.num_elems;
+                Inst::DynPtrAdd(DynPtrAddInst {
+                    ptr: mapper(&ptr, m),
+                    num_elems: mapper(&num_elems, m),
+                    elem_size: inst.elem_size,
+                })
+            }
+            Inst::FPToSI(FPToSIInst { val, dest_tyidx }) => Inst::FPToSI(FPToSIInst {
+                val: mapper(val, m),
+                dest_tyidx: *dest_tyidx,
+            }),
+            Inst::FPExt(FPExtInst { val, dest_tyidx }) => Inst::FPExt(FPExtInst {
+                val: mapper(val, m),
+                dest_tyidx: *dest_tyidx,
+            }),
+            Inst::FCmp(FCmpInst { lhs, pred, rhs }) => Inst::FCmp(FCmpInst {
+                lhs: mapper(lhs, m),
+                pred: *pred,
+                rhs: mapper(rhs, m),
+            }),
+            Inst::Guard(GuardInst { cond, expect, gidx }) => {
+                let ginfo = &m.guard_info[usize::from(*gidx)];
+                let newlives = ginfo
+                    .live_vars()
+                    .iter()
+                    .map(|(aot, jit)| (aot.clone(), mapper(jit, m)))
+                    .collect();
+                let newginfo = GuardInfo::new(
+                    ginfo.bid().clone(),
+                    newlives,
+                    ginfo.inlined_frames().to_vec(),
+                );
+                let newgidx = m.push_guardinfo(newginfo).unwrap();
+                Inst::Guard(GuardInst {
+                    cond: mapper(cond, m),
+                    expect: *expect,
+                    gidx: newgidx,
+                })
+            }
+            Inst::ICmp(ICmpInst { lhs, pred, rhs }) => Inst::ICmp(ICmpInst {
+                lhs: mapper(lhs, m),
+                pred: *pred,
+                rhs: mapper(rhs, m),
+            }),
+            Inst::Load(LoadInst {
+                op,
+                tyidx,
+                volatile,
+            }) => Inst::Load(LoadInst {
+                op: mapper(op, m),
+                tyidx: *tyidx,
+                volatile: *volatile,
+            }),
+            Inst::LoadTraceInput(_) => Inst::Tombstone,
+            Inst::LookupGlobal(g) => Inst::LookupGlobal(*g),
+            Inst::PtrAdd(inst) => {
+                let ptr = inst.ptr;
+                Inst::PtrAdd(PtrAddInst {
+                    ptr: mapper(&ptr, m),
+                    off: inst.off,
+                })
+            }
+            Inst::RootJump => {
+                // This instruction only exists in side-traces, which don't have loops we can peel
+                // off.
+                unreachable!()
+            }
+            Inst::Select(SelectInst {
+                cond,
+                trueval,
+                falseval,
+            }) => Inst::Select(SelectInst {
+                cond: mapper(cond, m),
+                trueval: mapper(trueval, m),
+                falseval: mapper(falseval, m),
+            }),
+            Inst::SExt(SExtInst { val, dest_tyidx }) => Inst::SExt(SExtInst {
+                val: mapper(val, m),
+                dest_tyidx: *dest_tyidx,
+            }),
+            Inst::SIToFP(SIToFPInst { val, dest_tyidx }) => Inst::SIToFP(SIToFPInst {
+                val: mapper(val, m),
+                dest_tyidx: *dest_tyidx,
+            }),
+            Inst::Store(StoreInst { tgt, val, volatile }) => Inst::Store(StoreInst {
+                tgt: mapper(tgt, m),
+                val: mapper(val, m),
+                volatile: *volatile,
+            }),
+            Inst::Tombstone => Inst::Tombstone,
+            Inst::TraceLoopStart => {
+                // The `tloop_start` of the unpeeled trace becomes the `reentry` of the trace
+                // header (used when looping back from side-traces).
+                m.trace_entry_vars = m.loop_start_vars.drain(..).collect();
+                // The `tloop_jump` of the trace header, becomes the `tloop_start` of the trace
+                // body.
+                m.loop_start_vars = m.loop_jump_vars.iter().map(Operand::clone).collect();
+                Inst::TraceLoopStart
+            }
+            Inst::TraceLoopJump => {
+                // Duplicate the `tloop_jump` from the trace header into the trace body, while
+                // remapping the operands to their cloned versions in the trace body.
+                m.loop_jump_vars = m.loop_jump_vars.iter().map(|op| op_mapper(op, m)).collect();
+                Inst::TraceLoopJump
+            }
+            Inst::Trunc(TruncInst { val, dest_tyidx }) => Inst::Trunc(TruncInst {
+                val: mapper(val, m),
+                dest_tyidx: *dest_tyidx,
+            }),
+            Inst::ZExt(ZExtInst { val, dest_tyidx }) => Inst::ZExt(ZExtInst {
+                val: mapper(val, m),
+                dest_tyidx: *dest_tyidx,
+            }),
+            e => todo!("{:?}", e),
+        };
+        Ok(inst)
     }
 
     /// Returns the size of the local variable that this instruction defines (if any).
@@ -1937,6 +2130,17 @@ impl fmt::Display for DisplayableInst<'_> {
                     "load_ti {:?}",
                     self.m.tilocs[usize::try_from(x.locidx()).unwrap()]
                 )
+            }
+            Inst::TraceReentryPoint => {
+                // Just marks a location, so we format it to look like a label.
+                write!(f, "reentry [")?;
+                for var in &self.m.trace_entry_vars {
+                    write!(f, "{}", var.display(self.m))?;
+                    if var != self.m.trace_entry_vars.last().unwrap() {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, "]:")
             }
             Inst::TraceLoopStart => {
                 // Just marks a location, so we format it to look like a label.

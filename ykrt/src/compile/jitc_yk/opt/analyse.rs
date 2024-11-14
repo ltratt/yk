@@ -18,7 +18,11 @@ pub(super) struct Analyse {
 impl Analyse {
     pub(super) fn new(m: &Module) -> Analyse {
         Analyse {
-            values: vec![Value::Unknown; m.insts_len()],
+            // We don't yet know the actual size of the module when using loop peeling. However, we
+            // do know that it is maximum 2 times the size. Since we don't copy over `loadti`
+            // instructions, it will always be slightly less.
+            // FIXME: Find way to calculate this more accurately.
+            values: vec![Value::Unknown; m.insts_len() * 2],
         }
     }
 

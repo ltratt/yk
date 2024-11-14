@@ -774,14 +774,17 @@ impl LSRegAlloc<'_> {
             match inst {
                 Inst::Copy(_) => panic!(),
                 Inst::Const(cidx) => match self.m.const_(cidx) {
-                    Const::Float(_, _) => todo!(),
+                    Const::Float(_, v) => VarLocation::ConstFloat(*v),
                     Const::Int(tyidx, v) => {
                         let Ty::Integer(bits) = self.m.type_(*tyidx) else {
                             panic!()
                         };
                         VarLocation::ConstInt { bits: *bits, v: *v }
                     }
-                    Const::Ptr(_) => todo!(),
+                    Const::Ptr(p) => VarLocation::ConstInt {
+                        bits: 64,
+                        v: u64::try_from(*p).unwrap(),
+                    },
                 },
                 _ => match self.spills[usize::from(iidx)] {
                     SpillState::Empty => panic!(),

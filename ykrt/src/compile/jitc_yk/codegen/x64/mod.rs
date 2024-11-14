@@ -176,7 +176,9 @@ impl X64CodeGen {
 struct Assemble<'a> {
     m: &'a jit_ir::Module,
     ra: LSRegAlloc<'a>,
-    /// The locations of the live variables at the beginning of the loop.
+    /// The locations of the live variables at the begining of the trace header.
+    trace_reentry_locs: Vec<VarLocation>,
+    /// The locations of the live variables at the beginning of the trace body.
     loop_start_locs: Vec<VarLocation>,
     asm: dynasmrt::x64::Assembler,
     /// Deopt info, with one entry per guard, in the order that the guards appear in the trace.
@@ -195,6 +197,9 @@ struct Assemble<'a> {
     /// The stack pointer offset of the root trace's frame from the base pointer of the interpreter
     /// frame. If this is the root trace, this will be None.
     root_offset: Option<usize>,
+    /// The offset after the trace's prologue. This is the re-entry point when returning from
+    /// side-traces.
+    prologue_offset: AssemblyOffset,
 }
 
 impl<'a> Assemble<'a> {
@@ -246,11 +251,13 @@ impl<'a> Assemble<'a> {
             m,
             ra: LSRegAlloc::new(m, sp_offset),
             asm,
+            trace_reentry_locs: Vec::new(),
             loop_start_locs: Vec::new(),
             deoptinfo: HashMap::new(),
             comments: Cell::new(IndexMap::new()),
             sp_offset,
             root_offset,
+            prologue_offset: AssemblyOffset(0),
         }))
     }
 
@@ -279,10 +286,6 @@ impl<'a> Assemble<'a> {
         }
 
         let alloc_off = self.emit_prologue();
-        // The instruction offset after we've emitted the prologue (i.e. updated the stack
-        // pointer). We will later adjust this offset to also include one iteration of the trace
-        // so we can jump directly to the peeled loop.
-        let prologue_offset = self.asm.offset();
 
         self.cg_insts()?;
 
@@ -441,8 +444,8 @@ impl<'a> Assemble<'a> {
             deoptinfo: self.deoptinfo,
             prevguards,
             sp_offset: self.ra.stack_size(),
-            prologue_offset: prologue_offset.0,
-            entry_vars: self.loop_start_locs.clone(),
+            prologue_offset: self.prologue_offset.0,
+            entry_vars: self.trace_reentry_locs.clone(),
             hl: Arc::downgrade(&hl),
             comments: self.comments.take(),
             #[cfg(any(debug_assertions, test))]
@@ -521,6 +524,7 @@ impl<'a> Assemble<'a> {
                     continue;
                 }
                 jit_ir::Inst::Guard(i) => self.cg_guard(iidx, i),
+                jit_ir::Inst::TraceReentryPoint => self.cg_tracereentrypoint(),
                 jit_ir::Inst::TraceLoopStart => self.cg_traceloopstart(),
                 jit_ir::Inst::TraceLoopJump => self.cg_traceloopjump(),
                 jit_ir::Inst::RootJump => self.cg_rootjump(self.m.root_jump_addr()),
@@ -1928,6 +1932,9 @@ impl<'a> Assemble<'a> {
                             8 => dynasm!(self.asm;
                                 mov QWORD [rbp - i32::try_from(off_dst).unwrap()], Rq(reg.code())
                             ),
+                            4 => dynasm!(self.asm;
+                                mov DWORD [rbp - i32::try_from(off_dst).unwrap()], Rd(reg.code())
+                            ),
                             _ => todo!(),
                         },
                         VarLocation::ConstInt { bits, v } => match bits {
@@ -2029,11 +2036,12 @@ impl<'a> Assemble<'a> {
             ; jmp rdi);
     }
 
-    fn cg_traceloopstart(&mut self) {
+    fn cg_tracereentrypoint(&mut self) {
         debug_assert_eq!(self.loop_start_locs.len(), 0);
-        // Remember the locations of the live variables at the beginning of the trace. When we loop
-        // back around here we need to write the live variables back into these same locations.
-        for var in self.m.loop_start_vars() {
+        // Remember the locations of the live variables at the beginning of the trace. When we
+        // re-enter the trace from a side-trace, we need to write the live variables back into
+        // these same locations.
+        for var in self.m.trace_entry_vars() {
             let loc = match var {
                 Operand::Var(iidx) => {
                     debug_assert_eq!(*iidx, self.m.inst_decopy(*iidx).0);
@@ -2041,10 +2049,27 @@ impl<'a> Assemble<'a> {
                 }
                 _ => panic!(),
             };
+            self.trace_reentry_locs.push(loc);
+        }
+        dynasm!(self.asm; ->reentry:);
+        self.prologue_offset = self.asm.offset();
+    }
+
+    fn cg_traceloopstart(&mut self) {
+        debug_assert_eq!(self.loop_start_locs.len(), 0);
+        // Remember the locations of the live variables at the beginning of the trace loop. When we
+        // loop back around here we need to write the live variables back into these same
+        // locations.
+        for var in self.m.loop_start_vars() {
+            let loc = match var {
+                Operand::Var(iidx) => {
+                    //debug_assert_eq!(*iidx, self.m.inst_decopy(*iidx).0);
+                    self.ra.var_location(self.m.inst_decopy(*iidx).0)
+                }
+                _ => panic!(),
+            };
             self.loop_start_locs.push(loc);
         }
-        // FIXME: peel the initial iteration of the loop to allow us to hoist loop invariants.
-        // When doing so, update the jump target inside side-traces.
         dynasm!(self.asm; ->tloop_start:);
     }
 
@@ -2407,9 +2432,10 @@ impl CompiledTrace for X64CompiledTrace {
             .collect();
         let callframes = deoptinfo.inlined_frames.clone();
 
-        // Calculate the address inside the root trace we want side-traces to jump to. Currently
-        // this is directly after the prologue. Later we will change this to jump to after the
-        // preamble and before the peeled loop.
+        // Calculate the address inside the root trace we want side-traces to jump. Since the
+        // side-trace finishes at the control point we need to re-enter via the trace header and
+        // cannot jump back directly into the trace body.
+        // FIXME: Check if RPython has found a solution to this (if there is any).
         let root_addr = unsafe { root_ctr.entry().add(root_ctr.prologue_offset) };
 
         // Pass along [GuardIdx]'s of previous guard failures and add this guard failure's

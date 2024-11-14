@@ -31,7 +31,24 @@ impl Opt {
     }
 
     fn opt(mut self) -> Result<Module, CompilationError> {
-        for iidx in self.m.iter_all_inst_idxs() {
+        let base = self.m.insts_len();
+        // The instruction offset after all `loadti` instructions.
+        let mut prologue_len = 0;
+        let mut i = 0;
+        let is_sidetrace = matches!(self.m.inst_raw(self.m.last_inst_idx()), Inst::RootJump);
+        // Instructions from the loop header that need to passed into the loop body, since they
+        // replace loop body instructions that have been removed by CSE.
+        let mut cse_insts = Vec::new();
+
+        // Disable loop peeling if there is no `tloop_jump` and we are running tests.
+        #[cfg(test)]
+        let disable_peel = !matches!(self.m.inst_raw(self.m.last_inst_idx()), Inst::TraceLoopJump);
+
+        // Note that since we will apply loop peeling here, the list of instructions grows as this
+        // loop runs. Each instruction we process is (after optimisations were applied), duplicated
+        // and copied to the end of the module.
+        while i < self.m.insts_len() {
+            let iidx = InstIdx::unchecked_from(i);
             match self.m.inst_raw(iidx) {
                 #[cfg(test)]
                 Inst::BlackBox(_) => (),
@@ -320,6 +337,7 @@ impl Opt {
                             }
                         }
                         if !removed {
+                            // Update knowledge about condition variable.
                             self.an.guard(&self.m, x);
                         }
                     }
@@ -382,9 +400,81 @@ impl Opt {
                         self.m.replace(iidx, Inst::Const(dst_cidx));
                     }
                 }
+                Inst::TraceLoopStart => prologue_len = usize::from(iidx),
                 _ => (),
             }
-            self.cse(iidx);
+            if let Some(copy) = self.cse(iidx) {
+                // Any CSEs that cross over from the trace header to the body need to be added to
+                // the loop_start_vars and loop_jump_vars.
+                if usize::from(iidx) > base && usize::from(copy) < base {
+                    cse_insts.push(copy);
+                }
+            }
+            i += 1;
+            #[cfg(test)]
+            if disable_peel {
+                continue;
+            }
+            // If this is a normal trace, copy each instruction into the peeled loop until we've
+            // reached the end of the initial trace. Note that this pushes to the list of
+            // instructions we are currently iterating over, so that optimisations are applied to
+            // the peeled loop as well.
+            if !is_sidetrace && usize::from(iidx) < base {
+                let c = self.m.inst_raw(iidx).dup_and_remap_locals(
+                    &mut self.m,
+                    &|i: InstIdx, m: &Module| {
+                        if usize::from(i) < prologue_len {
+                            // The duplicated instructions references a trace input (`loadti`).
+                            // However, the trace header may have updated the variable, which we
+                            // can get by using the index to look up the operand in the
+                            // `tloop_start` variables.
+                            //
+                            // Example:
+                            // $1 = loadti
+                            // $2 = loadti
+                            // reentry [$1, $2]     // formerly tloop_start
+                            // $3 = add, $2
+                            // tloop_start [$1, $3] // formerly tloop_jump
+                            // $4 = add, $3         // after duplicating this referenced $2
+                            // tloop_jump [$1, $5]
+                            match m.loop_start_vars()[usize::from(i)] {
+                                Operand::Var(iidx) => iidx,
+                                _ => unreachable!(),
+                            }
+                        } else {
+                            i.checked_add(base).unwrap()
+                        }
+                    },
+                )?;
+                self.m.push(c)?;
+                // After copying the loop start and end into the trace body, we must remove them
+                // from the trace header.
+                match self.m.inst_raw(iidx) {
+                    Inst::TraceLoopStart => self.m.replace(iidx, Inst::TraceReentryPoint),
+                    Inst::TraceLoopJump => self.m.replace(iidx, Inst::Tombstone),
+                    _ => (),
+                }
+            }
+        }
+        // Add common subexpressions that replace trace body instructions to the `tloop_start` and
+        // `tloop_jump` variables, so that they remain available after looping.
+        for var in &cse_insts {
+            self.m.push_loop_start_var(Operand::Var(*var));
+            // FIXME: According to the RPython paper we need to apply the mapping function to these
+            // variables too. However, by definition these always map back to the same variable.
+            // Example:
+            //
+            //   $1 = loadti
+            //   reentry [$1]
+            //   $3 = lookup_global x  // this will be in `cse_insts`
+            //   tloop_start [$1, $3]
+            //   $5 = Inst::Copy($3)
+            //   tloop_jump [$1, $3]
+            //
+            // Applying the mapping function to $3, gives us Inst::Copy($3), which after decopying
+            // results in $3 again.
+            self.m
+                .push_loop_jump_var(Operand::Var(var.checked_add(base).unwrap()));
         }
         // FIXME: When code generation supports backwards register allocation, we won't need to
         // explicitly perform dead code elimination and this function can be made `#[cfg(test)]` only.
@@ -393,21 +483,19 @@ impl Opt {
     }
 
     /// Attempt common subexpression elimination on `iidx`, replacing it with a `Copy` if possible.
-    fn cse(&mut self, iidx: InstIdx) {
+    fn cse(&mut self, iidx: InstIdx) -> Option<InstIdx> {
         // If this instruction is already a `Copy`, then there is nothing for CSE to do.
-        let Some(inst) = self.m.inst_nocopy(iidx) else {
-            return;
-        };
+        let inst = self.m.inst_nocopy(iidx)?;
         // There's no point in trying CSE on a `Tombstone`.
         if let Inst::Tombstone = inst {
-            return;
+            return None;
         }
         // We don't perform CSE on instructions that have / enforce effects.
         if inst.has_store_effect(&self.m)
             || inst.has_load_effect(&self.m)
             || inst.is_barrier(&self.m)
         {
-            return;
+            return None;
         }
 
         // OPT: This is O(n), but most instructions can't possibly be CSE candidates.
@@ -421,9 +509,10 @@ impl Opt {
 
             if inst.decopy_eq(&self.m, back) {
                 self.m.replace(iidx, Inst::Copy(back_iidx));
-                return;
+                return Some(back_iidx);
             }
         }
+        None
     }
 
     /// Optimise an [ICmpInst].
