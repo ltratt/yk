@@ -1142,4 +1142,28 @@ mod test {
         ",
         );
     }
+
+    #[test]
+    fn opt_peeling_simple() {
+        Module::assert_ir_transform_eq(
+            "
+          entry:
+            %0: i8 = load_ti 0
+            tloop_start [%0]
+            %2: i8 = add %0, 1i8
+            tloop_jump [%2]
+        ",
+            |m| opt(m).unwrap(),
+            "
+          ...
+          entry:
+            %0: i8 = load_ti ...
+            reentry [%0]
+            %2: i8 = add %0, 1i8
+            tloop_start [%2]
+            %6: i8 = add %2, 1i8
+            tloop_jump [%6]
+        ",
+        );
+    }
 }

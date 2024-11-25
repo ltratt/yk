@@ -2140,7 +2140,7 @@ impl fmt::Display for DisplayableInst<'_> {
                         write!(f, ", ")?;
                     }
                 }
-                write!(f, "]:")
+                write!(f, "]")
             }
             Inst::TraceLoopStart => {
                 // Just marks a location, so we format it to look like a label.
@@ -2151,7 +2151,7 @@ impl fmt::Display for DisplayableInst<'_> {
                         write!(f, ", ")?;
                     }
                 }
-                write!(f, "]:")
+                write!(f, "]")
             }
             Inst::TraceLoopJump => {
                 // Just marks a location, so we format it to look like a label.
@@ -2162,7 +2162,7 @@ impl fmt::Display for DisplayableInst<'_> {
                         write!(f, ", ")?;
                     }
                 }
-                write!(f, "]:")
+                write!(f, "]")
             }
             Inst::RootJump => {
                 write!(f, "parent_jump {:?} [", self.m.root_jump_ptr)?;
@@ -2172,7 +2172,7 @@ impl fmt::Display for DisplayableInst<'_> {
                         write!(f, ", ")?;
                     }
                 }
-                write!(f, "]:")
+                write!(f, "]")
             }
             Inst::SExt(i) => {
                 write!(f, "sext {}", i.val(self.m).display(self.m),)
