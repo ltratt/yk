@@ -158,11 +158,11 @@ pub(crate) struct Module {
     /// Indirect calls.
     indirect_calls: Vec<IndirectCallInst>,
     /// Live variables at the beginning of the loop.
-    loop_start_vars: Vec<Operand>,
+    loop_start_vars: Vec<PackedOperand>,
     /// Live variables at the end of the loop.
-    loop_jump_vars: Vec<Operand>,
+    loop_jump_vars: Vec<PackedOperand>,
     /// Live variables at the beginning of this trace.
-    trace_entry_vars: Vec<Operand>,
+    trace_entry_vars: Vec<PackedOperand>,
     /// Live variables at the beginning of the root trace.
     root_entry_vars: Vec<VarLocation>,
     /// The virtual address of the global variable pointer array.
@@ -598,16 +598,16 @@ impl Module {
         GuardInfoIdx::try_from(self.guard_info.len()).inspect(|_| self.guard_info.push(info))
     }
 
-    pub(crate) fn trace_entry_vars(&self) -> &[Operand] {
+    pub(crate) fn trace_entry_vars(&self) -> &[PackedOperand] {
         &self.trace_entry_vars
     }
 
-    pub(crate) fn loop_start_vars(&self) -> &[Operand] {
+    pub(crate) fn loop_start_vars(&self) -> &[PackedOperand] {
         &self.loop_start_vars
     }
 
     pub(crate) fn push_loop_start_var(&mut self, op: Operand) {
-        self.loop_start_vars.push(op);
+        self.loop_start_vars.push(PackedOperand::new(&op));
     }
 
     /// Store the entry live variables of the root traces so we can copy this side-trace's live
@@ -616,7 +616,7 @@ impl Module {
         self.root_entry_vars.extend_from_slice(entry_vars);
     }
 
-    pub(crate) fn loop_jump_vars(&self) -> &[Operand] {
+    pub(crate) fn loop_jump_vars(&self) -> &[PackedOperand] {
         &self.loop_jump_vars
     }
 
@@ -626,7 +626,7 @@ impl Module {
     }
 
     pub(crate) fn push_loop_jump_var(&mut self, op: Operand) {
-        self.loop_jump_vars.push(op);
+        self.loop_jump_vars.push(PackedOperand::new(&op));
     }
 
     /// Get the address of the root trace. This is where we need jump to at the end of a
@@ -1722,34 +1722,22 @@ impl Inst {
             }
             Inst::TraceReentryPoint => {
                 for val in &m.trace_entry_vars {
-                    match val {
-                        Operand::Var(iidx) => f(*iidx),
-                        _ => panic!(),
-                    }
+                    val.map_iidx(f);
                 }
             }
             Inst::TraceLoopStart => {
                 for val in &m.loop_start_vars {
-                    match val {
-                        Operand::Var(iidx) => f(*iidx),
-                        _ => panic!(),
-                    }
+                    val.map_iidx(f);
                 }
             }
             Inst::TraceLoopJump => {
                 for val in &m.loop_jump_vars {
-                    match val {
-                        Operand::Var(iidx) => f(*iidx),
-                        Operand::Const(_) => (),
-                    }
+                    val.map_iidx(f);
                 }
             }
             Inst::RootJump => {
                 for val in &m.loop_jump_vars {
-                    match val {
-                        Operand::Var(iidx) => f(*iidx),
-                        Operand::Const(_) => (),
-                    }
+                    val.map_iidx(f);
                 }
             }
             Inst::SExt(SExtInst { val, .. }) => val.map_iidx(f),
@@ -1783,14 +1771,14 @@ impl Inst {
         f: &F,
     ) -> Result<Self, CompilationError>
     where
-        F: Fn(InstIdx, &Module) -> InstIdx,
+        F: Fn(InstIdx, &Module) -> Operand,
     {
         let mapper = |x: &PackedOperand, m: &Module| match x.unpack(m) {
-            Operand::Var(iidx) => PackedOperand::new(&Operand::Var(f(iidx, m))),
+            Operand::Var(iidx) => PackedOperand::new(&f(iidx, m)),
             Operand::Const(_) => *x,
         };
         let op_mapper = |x: &Operand, m: &Module| match x {
-            Operand::Var(iidx) => Operand::Var(f(*iidx, m)),
+            Operand::Var(iidx) => f(*iidx, m),
             Operand::Const(c) => Operand::Const(*c),
         };
         let inst = match self {
@@ -1822,7 +1810,10 @@ impl Inst {
                 Inst::IndirectCall(idx)
             }
             Inst::Const(c) => Inst::Const(*c),
-            Inst::Copy(iidx) => Inst::Copy(f(*iidx, m)),
+            Inst::Copy(iidx) => match f(*iidx, m) {
+                Operand::Var(iidx) => Inst::Copy(iidx),
+                Operand::Const(cidx) => Inst::Const(cidx),
+            }
             Inst::DynPtrAdd(inst) => {
                 let ptr = inst.ptr;
                 let num_elems = inst.num_elems;
@@ -1921,13 +1912,17 @@ impl Inst {
                 m.trace_entry_vars = m.loop_start_vars.drain(..).collect();
                 // The `tloop_jump` of the trace header, becomes the `tloop_start` of the trace
                 // body.
-                m.loop_start_vars = m.loop_jump_vars.iter().map(Operand::clone).collect();
+                m.loop_start_vars = m.loop_jump_vars.clone();
                 Inst::TraceLoopStart
             }
             Inst::TraceLoopJump => {
                 // Duplicate the `tloop_jump` from the trace header into the trace body, while
                 // remapping the operands to their cloned versions in the trace body.
-                m.loop_jump_vars = m.loop_jump_vars.iter().map(|op| op_mapper(op, m)).collect();
+                m.loop_jump_vars = m
+                    .loop_jump_vars
+                    .iter()
+                    .map(|op| PackedOperand::new(&op_mapper(&op.unpack(m), m)))
+                    .collect();
                 Inst::TraceLoopJump
             }
             Inst::Trunc(TruncInst { val, dest_tyidx }) => Inst::Trunc(TruncInst {
@@ -2135,7 +2130,7 @@ impl fmt::Display for DisplayableInst<'_> {
                 // Just marks a location, so we format it to look like a label.
                 write!(f, "reentry [")?;
                 for var in &self.m.trace_entry_vars {
-                    write!(f, "{}", var.display(self.m))?;
+                    write!(f, "{}", var.unpack(self.m).display(self.m))?;
                     if var != self.m.trace_entry_vars.last().unwrap() {
                         write!(f, ", ")?;
                     }
@@ -2146,7 +2141,7 @@ impl fmt::Display for DisplayableInst<'_> {
                 // Just marks a location, so we format it to look like a label.
                 write!(f, "tloop_start [")?;
                 for var in &self.m.loop_start_vars {
-                    write!(f, "{}", var.display(self.m))?;
+                    write!(f, "{}", var.unpack(self.m).display(self.m))?;
                     if var != self.m.loop_start_vars.last().unwrap() {
                         write!(f, ", ")?;
                     }
@@ -2157,7 +2152,7 @@ impl fmt::Display for DisplayableInst<'_> {
                 // Just marks a location, so we format it to look like a label.
                 write!(f, "tloop_jump [")?;
                 for var in &self.m.loop_jump_vars {
-                    write!(f, "{}", var.display(self.m))?;
+                    write!(f, "{}", var.unpack(self.m).display(self.m))?;
                     if var != self.m.loop_jump_vars.last().unwrap() {
                         write!(f, ", ")?;
                     }
@@ -2167,7 +2162,7 @@ impl fmt::Display for DisplayableInst<'_> {
             Inst::RootJump => {
                 write!(f, "parent_jump {:?} [", self.m.root_jump_ptr)?;
                 for var in &self.m.loop_jump_vars {
-                    write!(f, "{}", var.display(self.m))?;
+                    write!(f, "{}", var.unpack(self.m).display(self.m))?;
                     if var != self.m.loop_jump_vars.last().unwrap() {
                         write!(f, ", ")?;
                     }

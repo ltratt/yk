@@ -437,12 +437,9 @@ impl Opt {
                             // tloop_start [$1, $3] // formerly tloop_jump
                             // $4 = add, $3         // after duplicating this referenced $2
                             // tloop_jump [$1, $5]
-                            match m.loop_start_vars()[usize::from(i)] {
-                                Operand::Var(iidx) => iidx,
-                                _ => unreachable!(),
-                            }
+                            m.loop_start_vars()[usize::from(i)].unpack(m)
                         } else {
-                            i.checked_add(base).unwrap()
+                            Operand::Var(InstIdx::try_from(i.checked_add(base).unwrap()).unwrap())
                         }
                     },
                 )?;

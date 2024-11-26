@@ -526,8 +526,8 @@ impl<'a> Assemble<'a> {
                 jit_ir::Inst::Guard(i) => self.cg_guard(iidx, i),
                 jit_ir::Inst::TraceReentryPoint => self.cg_tracereentrypoint(),
                 jit_ir::Inst::TraceLoopStart => self.cg_traceloopstart(),
-                jit_ir::Inst::TraceLoopJump => self.cg_traceloopjump(),
-                jit_ir::Inst::RootJump => self.cg_rootjump(self.m.root_jump_addr()),
+                jit_ir::Inst::TraceLoopJump => self.cg_traceloopjump(iidx),
+                jit_ir::Inst::RootJump => self.cg_rootjump(iidx, self.m.root_jump_addr()),
                 jit_ir::Inst::SExt(i) => self.cg_sext(iidx, i),
                 jit_ir::Inst::ZExt(i) => self.cg_zext(iidx, i),
                 jit_ir::Inst::BitCast(i) => self.cg_bitcast(iidx, i),
@@ -1593,6 +1593,25 @@ impl<'a> Assemble<'a> {
         Ok(())
     }
 
+    fn op_to_var_location(&self, op: Operand) -> VarLocation {
+        match op {
+            Operand::Var(iidx) => self.ra.var_location(iidx),
+            Operand::Const(cidx) => match self.m.const_(cidx) {
+                Const::Float(_, v) => VarLocation::ConstFloat(*v),
+                Const::Int(tyidx, v) => {
+                    let Ty::Integer(bit_size) = self.m.type_(*tyidx) else {
+                        panic!()
+                    };
+                    VarLocation::ConstInt {
+                        bits: *bit_size,
+                        v: *v,
+                    }
+                }
+                Const::Ptr(v) => VarLocation::ConstPtr(*v),
+            },
+        }
+    }
+
     /// If an `Operand` refers to a constant integer that can be represented as an `i8`, return
     /// it, otherwise return `None`.
     fn op_to_i8(&self, op: &Operand) -> Option<i8> {
@@ -1904,18 +1923,13 @@ impl<'a> Assemble<'a> {
     /// # Arguments
     ///
     /// * `tgt_vars` - The target locations. If `None` use `self.loop_start_locs` instead.
-    fn write_jump_vars(&mut self, tgt_vars: Option<&[VarLocation]>) {
+    fn write_jump_vars(&mut self, iidx: InstIdx, tgt_vars: Option<&[VarLocation]>) {
         // If we pass in `None` use `self.loop_start_locs` instead. We need to do this since we
         // can't pass in `&self.loop_start_locs` directly due to borrowing restrictions.
         let tgt_vars = tgt_vars.unwrap_or(self.loop_start_locs.as_slice());
         for (i, op) in self.m.loop_jump_vars().iter().enumerate() {
-            let (iidx, src) = match op {
-                Operand::Var(iidx) => {
-                    let iidx = self.m.inst_decopy(*iidx).0;
-                    (iidx, self.ra.var_location(iidx))
-                }
-                _ => panic!(),
-            };
+            let op = op.unpack(self.m);
+            let src = self.op_to_var_location(op.clone());
             let dst = tgt_vars[i];
             if dst == src {
                 // The value is already in the correct place, so there's nothing we need to
@@ -1943,6 +1957,13 @@ impl<'a> Assemble<'a> {
                             ),
                             _ => todo!(),
                         },
+                        VarLocation::ConstPtr(v) => {
+                            dynasm!(self.asm;
+                                push rax;
+                                mov rax, QWORD v as i64;
+                                mov QWORD [rbp - i32::try_from(off_dst).unwrap()], rax;
+                                pop rax)
+                        }
                         VarLocation::Stack {
                             frame_off: off_src,
                             size: size_src,
@@ -1992,14 +2013,14 @@ impl<'a> Assemble<'a> {
         }
     }
 
-    fn cg_traceloopjump(&mut self) {
+    fn cg_traceloopjump(&mut self, iidx: InstIdx) {
         // Loop the JITted code if the `tloop_start` label is present (not relevant for IR created
         // by a test or a side-trace).
         let label = StaticLabel::global("tloop_start");
         match self.asm.labels().resolve_static(&label) {
             Ok(_) => {
                 // Found the label, emit a jump to it.
-                self.write_jump_vars(None);
+                self.write_jump_vars(iidx, None);
                 dynasm!(self.asm; jmp ->tloop_start);
             }
             Err(DynasmError::UnknownLabel(_)) => {
@@ -2020,10 +2041,10 @@ impl<'a> Assemble<'a> {
         }
     }
 
-    fn cg_rootjump(&mut self, addr: *const libc::c_void) {
+    fn cg_rootjump(&mut self, iidx: InstIdx, addr: *const libc::c_void) {
         // The end of a side-trace. Map live variables of this side-trace to the entry variables of
         // the root parent trace, then jump to it.
-        self.write_jump_vars(Some(self.m.root_entry_vars()));
+        self.write_jump_vars(iidx, Some(self.m.root_entry_vars()));
         self.ra.align_stack(SYSV_CALL_STACK_ALIGN);
 
         dynasm!(self.asm
@@ -2042,11 +2063,8 @@ impl<'a> Assemble<'a> {
         // re-enter the trace from a side-trace, we need to write the live variables back into
         // these same locations.
         for var in self.m.trace_entry_vars() {
-            let loc = match var {
-                Operand::Var(iidx) => {
-                    debug_assert_eq!(*iidx, self.m.inst_decopy(*iidx).0);
-                    self.ra.var_location(*iidx)
-                }
+            let loc = match var.unpack(self.m) {
+                Operand::Var(iidx) => self.ra.var_location(iidx),
                 _ => panic!(),
             };
             self.trace_reentry_locs.push(loc);
@@ -2061,13 +2079,7 @@ impl<'a> Assemble<'a> {
         // loop back around here we need to write the live variables back into these same
         // locations.
         for var in self.m.loop_start_vars() {
-            let loc = match var {
-                Operand::Var(iidx) => {
-                    //debug_assert_eq!(*iidx, self.m.inst_decopy(*iidx).0);
-                    self.ra.var_location(self.m.inst_decopy(*iidx).0)
-                }
-                _ => panic!(),
-            };
+            let loc = self.op_to_var_location(var.unpack(&self.m));
             self.loop_start_locs.push(loc);
         }
         dynasm!(self.asm; ->tloop_start:);
