@@ -331,9 +331,9 @@ impl LSRegAlloc<'_> {
         self.spills[usize::from(iidx)] = SpillState::Stack(frame_off);
     }
 
-    /// Forcibly assign a constant to an instruction. This typically only happens when traces pass
-    /// live variables that have been optimised to constants into side-traces.
-    pub(crate) fn assign_const(&mut self, iidx: InstIdx, bits: u32, v: u64) {
+    /// Forcibly assign a constant integer to an instruction. This typically only happens when
+    /// traces pass live variables that have been optimised to constants into side-traces.
+    pub(crate) fn assign_const_int(&mut self, iidx: InstIdx, bits: u32, v: u64) {
         self.spills[usize::from(iidx)] = SpillState::ConstInt { bits, v };
     }
 

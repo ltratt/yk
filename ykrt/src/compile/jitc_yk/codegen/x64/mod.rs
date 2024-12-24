@@ -1095,7 +1095,7 @@ impl<'a> Assemble<'a> {
                     .force_assign_inst_indirect(iidx, i32::try_from(frame_off).unwrap());
             }
             VarLocation::ConstInt { bits, v } => {
-                self.ra.assign_const(iidx, bits, v);
+                self.ra.assign_const_int(iidx, bits, v);
             }
             e => panic!("{:?}", e),
         }
@@ -2007,7 +2007,7 @@ impl<'a> Assemble<'a> {
                             );
                         }
                         VarLocation::ConstInt { bits, v } => {
-                            self.ra.assign_const(iidx, bits, v);
+                            self.ra.assign_const_int(iidx, bits, v);
                         }
                         e => panic!("{:?}", e),
                     }
