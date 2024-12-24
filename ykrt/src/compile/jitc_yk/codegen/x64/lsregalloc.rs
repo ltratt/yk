@@ -337,6 +337,12 @@ impl LSRegAlloc<'_> {
         self.spills[usize::from(iidx)] = SpillState::ConstInt { bits, v };
     }
 
+    /// Forcibly assign a constant integer to an instruction. This typically only happens when
+    /// traces pass live variables that have been optimised to constants into side-traces.
+    pub(crate) fn assign_const_ptr(&mut self, iidx: InstIdx, v: usize) {
+        self.spills[usize::from(iidx)] = SpillState::ConstPtr(v);
+    }
+
     /// Assign registers for the instruction `iidx`, which consumes the [Operand] `op` but does not
     /// change its value. In many cases, the register allocator can avoid generating any code for
     /// this case at all.
@@ -865,8 +871,12 @@ impl LSRegAlloc<'_> {
                 32 => {
                     dynasm!(asm; mov Rd(reg.code()), v as i32)
                 }
-                _ => todo!(),
+                8 => {
+                    dynasm!(asm; mov Rb(reg.code()), v as i8)
+                }
+                _ => todo!("{bits}"),
             },
+            SpillState::ConstPtr(_) => todo!(),
         }
     }
 
@@ -941,6 +951,7 @@ impl LSRegAlloc<'_> {
                         size,
                     },
                     SpillState::ConstInt { bits, v } => VarLocation::ConstInt { bits, v },
+                    SpillState::ConstPtr(v) => VarLocation::ConstPtr(v),
                 },
             }
         }
@@ -1361,6 +1372,7 @@ impl LSRegAlloc<'_> {
             SpillState::ConstInt { bits: _bits, v: _v } => {
                 todo!()
             }
+            SpillState::ConstPtr(_) => todo!(),
         }
     }
 
@@ -1589,8 +1601,10 @@ enum SpillState {
     ///
     /// Note: two SSA variables can alias to the same `Direct` location.
     Direct(i32),
-    /// This variable is a constant.
+    /// This variable is a constant integer.
     ConstInt { bits: u32, v: u64 },
+    /// This variable is a constant pointer.
+    ConstPtr(usize),
 }
 
 #[cfg(test)]

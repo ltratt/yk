@@ -2009,6 +2009,9 @@ impl<'a> Assemble<'a> {
                         VarLocation::ConstInt { bits, v } => {
                             self.ra.assign_const_int(iidx, bits, v);
                         }
+                        VarLocation::ConstPtr(v) => {
+                            self.ra.assign_const_ptr(iidx, v);
+                        }
                         e => panic!("{:?}", e),
                     }
                 }
