@@ -116,22 +116,21 @@ impl<Register: Send + Sync + 'static> TraceBuilder<Register> {
         &mut self,
         blk: &'static aot_ir::BBlock,
     ) -> Result<(), CompilationError> {
-        // Find the control point call to retrieve the live variables from its safepoint.
-        //
-        // FIXME: Stash the location at IR lowering time, instead of searching at runtime.
-        let mut safepoint = None;
-        let mut inst_iter = blk.insts.iter().enumerate().rev();
-        for (_, inst) in inst_iter.by_ref() {
-            // Is it a call to the control point, then insert loads for the trace inputs. These
-            // directly reference registers or stack slots in the parent frame and thus don't
-            // necessarily result in machine code during codegen.
-            if inst.is_control_point(self.aot_mod) {
-                safepoint = Some(inst.safepoint().unwrap());
-                break;
+        let safepoint = match self.jit_mod.tracekind() {
+            TraceKind::HeaderOnly | TraceKind::HeaderAndBody => {
+                // Find the control point call to retrieve the live variables from its safepoint.
+                //
+                // FIXME: Stash the location at IR lowering time, instead of searching at runtime.
+                blk.insts
+                    .iter()
+                    .rev()
+                    .find(|x| x.is_control_point(self.aot_mod))
+                    .map(|x| x.safepoint().unwrap())
+                    .unwrap()
             }
-        }
-        // If we don't find a safepoint here something has gone wrong with the AOT IR.
-        let safepoint = safepoint.unwrap();
+            TraceKind::Sidetrace(_) => unreachable!(),
+        };
+
         let (rec, _) = AOT_STACKMAPS
             .as_ref()
             .unwrap()
