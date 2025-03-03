@@ -379,6 +379,10 @@ fn map_to_tivec<I, T>(v: Vec<T>) -> Result<TiVec<I, T>, DekuError> {
     Ok(TiVec::from(v))
 }
 
+fn map_to_option_arc<T>(v: T) -> Result<Option<Arc<T>>, DekuError> {
+    Ok(Some(Arc::new(v)))
+}
+
 #[deku_derive(DekuRead)]
 #[derive(Debug)]
 struct RawPath {
@@ -835,8 +839,12 @@ pub(crate) enum Inst {
         args: Vec<Operand>,
         #[deku(temp)]
         has_safepoint: u8,
-        #[deku(cond = "*has_safepoint != 0", default = "None")]
-        safepoint: Option<DeoptSafepoint>,
+        #[deku(
+            cond = "*has_safepoint != 0",
+            default = "None",
+            map = "map_to_option_arc"
+        )]
+        safepoint: Option<Arc<DeoptSafepoint>>,
     },
     #[deku(id = "5")]
     Br {
@@ -1101,8 +1109,17 @@ impl Inst {
 
     pub(crate) fn safepoint(&'static self) -> Option<&'static DeoptSafepoint> {
         match self {
-            Self::Call { safepoint, .. } => safepoint.as_ref(),
+            Self::Call { safepoint, .. } => safepoint.as_deref(),
             Self::CondBr { ref safepoint, .. } => Some(safepoint),
+            _ => None,
+        }
+    }
+
+    /// If `self` has a safepoint that is wrapped in an `Arc` (and not all safepoints are!), then
+    /// return it.
+    pub(crate) fn safepoint_arc(&'static self) -> Option<Arc<DeoptSafepoint>> {
+        match self {
+            Self::Call { safepoint, .. } => safepoint.as_ref().map(|x| Arc::clone(x)),
             _ => None,
         }
     }

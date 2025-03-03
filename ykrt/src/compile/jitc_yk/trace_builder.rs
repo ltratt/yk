@@ -125,7 +125,7 @@ impl<Register: Send + Sync + 'static> TraceBuilder<Register> {
                     .iter()
                     .rev()
                     .find(|x| x.is_control_point(self.aot_mod))
-                    .map(|x| x.safepoint().unwrap())
+                    .map(|x| x.safepoint_arc().unwrap())
                     .unwrap()
             }
             TraceKind::Sidetrace(_) => unreachable!(),
