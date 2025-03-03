@@ -1436,25 +1436,17 @@ impl<Register: Send + Sync + 'static> TraceBuilder<Register> {
         let blk = self.aot_mod.bblock(self.cp_block.as_ref().unwrap());
         let cpcall = blk.insts.iter().rev().nth(1).unwrap();
         debug_assert!(cpcall.is_control_point(self.aot_mod));
+        let safepoint = cpcall.safepoint().unwrap();
+        for idx in 0..safepoint.lives.len() {
+            let aot_op = &safepoint.lives[idx];
+            let jit_op = &self.local_map[&aot_op.to_inst_id()];
+            self.jit_mod.push_header_end_var(jit_op.clone());
+        }
         match self.jit_mod.tracekind() {
             TraceKind::Sidetrace(_) => {
-                // This is the end of a side-trace. Create a jump back to the root trace.
-                let safepoint = cpcall.safepoint().unwrap();
-                for idx in 0..safepoint.lives.len() {
-                    let aot_op = &safepoint.lives[idx];
-                    let jit_op = &self.local_map[&aot_op.to_inst_id()];
-                    self.jit_mod.push_header_end_var(jit_op.clone());
-                }
                 self.jit_mod.push(jit_ir::Inst::SidetraceEnd)?;
             }
             TraceKind::HeaderAndBody | TraceKind::HeaderOnly => {
-                // For normal traces insert a jump back to the loop start.
-                let safepoint = cpcall.safepoint().unwrap();
-                for idx in 0..safepoint.lives.len() {
-                    let aot_op = &safepoint.lives[idx];
-                    let jit_op = &self.local_map[&aot_op.to_inst_id()];
-                    self.jit_mod.push_header_end_var(jit_op.clone());
-                }
                 self.jit_mod.push(jit_ir::Inst::TraceHeaderEnd)?;
             }
         }
