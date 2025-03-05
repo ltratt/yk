@@ -275,6 +275,7 @@ impl MT {
         self: &Arc<Self>,
         trace_iter: (Box<dyn AOTTraceIterator>, Box<[u8]>, Vec<String>),
         hl_arc: Arc<Mutex<HotLocation>>,
+        linktr: Option<Arc<dyn CompiledTrace>>,
     ) {
         self.stats.trace_recorded_ok();
         let mt = Arc::clone(self);
@@ -290,20 +291,21 @@ impl MT {
                 Arc::clone(&hl_arc),
                 trace_iter.1,
                 trace_iter.2,
+                linktr,
             ) {
                 Ok(ctr) => {
                     mt.compiled_traces
                         .lock()
                         .insert(ctr.ctrid(), Arc::clone(&ctr));
                     let mut hl = hl_arc.lock();
-                    debug_assert_matches!(hl.kind, HotLocationKind::Compiling);
+                    assert_matches!(hl.kind, HotLocationKind::Compiling);
                     hl.kind = HotLocationKind::Compiled(ctr);
                     mt.stats.trace_compiled_ok();
                 }
                 Err(e) => {
                     mt.stats.trace_compiled_err();
                     let mut hl = hl_arc.lock();
-                    debug_assert_matches!(hl.kind, HotLocationKind::Compiling);
+                    assert_matches!(hl.kind, HotLocationKind::Compiling);
                     if let TraceFailed::DontTrace = hl.tracecompilation_error(&mt) {
                         hl.kind = HotLocationKind::DontTrace;
                     } else {
@@ -494,7 +496,7 @@ impl MT {
                     }
                 }
             }
-            TransitionControlPoint::StopTracing => {
+            TransitionControlPoint::StopTracing(linktr) => {
                 // Assuming no bugs elsewhere, the `unwrap`s cannot fail, because `StartTracing`
                 // will have put a `Some` in the `Rc`.
                 let (hl, thread_tracer, promotions, debug_strs) =
@@ -521,6 +523,7 @@ impl MT {
                         self.queue_root_compile_job(
                             (utrace, promotions.into_boxed_slice(), debug_strs),
                             hl,
+                            linktr,
                         );
                     }
                     Err(e) => {
@@ -688,8 +691,25 @@ impl MT {
                     match lk.kind {
                         HotLocationKind::Compiled(ref ctr) => {
                             if is_tracing {
-                                // This thread is tracing something, so bail out as quickly as possible
-                                TransitionControlPoint::AbortTracing
+                                let ctr = Arc::clone(ctr);
+                                drop(lk);
+                                if let MTThreadState::Tracing { hl: tracing_hl, .. } =
+                                    mtt.peek_mut_tstate()
+                                {
+                                    let mut lk = tracing_hl.lock();
+                                    if let HotLocationKind::SideTracing { root_ctr, .. } = &lk.kind
+                                    {
+                                        // OPT ME!
+                                        println!("oops side tracing");
+                                        lk.kind = HotLocationKind::Compiled(Arc::clone(root_ctr));
+                                        return TransitionControlPoint::AbortTracing;
+                                    } else {
+                                        lk.kind = HotLocationKind::Compiling;
+                                    }
+                                } else {
+                                    panic!()
+                                }
+                                TransitionControlPoint::StopTracing(Some(ctr))
                             } else {
                                 TransitionControlPoint::Execute(Arc::clone(ctr))
                             }
@@ -719,7 +739,7 @@ impl MT {
                                     } else {
                                         // ...and it's this location...
                                         lk.kind = HotLocationKind::Compiling;
-                                        TransitionControlPoint::StopTracing
+                                        TransitionControlPoint::StopTracing(None)
                                     }
                                 }
                                 _ => {
@@ -1230,7 +1250,7 @@ enum TransitionControlPoint {
     AbortTracing,
     Execute(Arc<dyn CompiledTrace>),
     StartTracing(Arc<Mutex<HotLocation>>),
-    StopTracing,
+    StopTracing(Option<Arc<dyn CompiledTrace>>),
     StopSideTracing {
         gidx: GuardIdx,
         parent_ctr: Arc<dyn CompiledTrace>,
@@ -1332,7 +1352,8 @@ mod tests {
     }
 
     fn expect_stop_tracing(mt: &Arc<MT>, loc: &Location) {
-        let TransitionControlPoint::StopTracing = mt.transition_control_point(loc, ptr::null_mut())
+        let TransitionControlPoint::StopTracing(None) =
+            mt.transition_control_point(loc, ptr::null_mut())
         else {
             panic!()
         };
@@ -1748,7 +1769,7 @@ mod tests {
                             }
                             break;
                         }
-                        TransitionControlPoint::StopTracing
+                        TransitionControlPoint::StopTracing(_)
                         | TransitionControlPoint::StopSideTracing { .. } => unreachable!(),
                     }
                 }

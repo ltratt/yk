@@ -54,6 +54,7 @@ pub(crate) trait Compiler: Send + Sync {
         hl: Arc<Mutex<HotLocation>>,
         promotions: Box<[u8]>,
         debug_strs: Vec<String>,
+        linktr: Option<Arc<dyn CompiledTrace>>,
     ) -> Result<Arc<dyn CompiledTrace>, CompilationError>;
 
     /// Compile a mapped root trace into machine code.

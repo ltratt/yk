@@ -16,6 +16,7 @@
 
 use super::{
     super::{
+        aot_ir::DeoptSafepoint,
         jit_ir::{self, BinOp, FloatTy, Inst, InstIdx, Module, Operand, TraceKind, Ty},
         CompilationError,
     },
@@ -139,6 +140,7 @@ pub(crate) type VarLocation = super::reg_alloc::VarLocation<Register>;
 
 /// The lock used when patching a side-trace into a parent trace.
 static LK_PATCH: Mutex<()> = Mutex::new(());
+static only_one_link_trace: Mutex<bool> = Mutex::new(false);
 /// x86 NOP opcode.
 const NOP_OPCODE: u8 = 0x90;
 
@@ -341,7 +343,7 @@ impl<'a> Assemble<'a> {
         // Since we are executing the trace in the main interpreter frame we need this to
         // initialise the trace's register allocator in order to access local variables.
         let sp_offset = match m.tracekind() {
-            TraceKind::HeaderOnly | TraceKind::HeaderAndBody => {
+            TraceKind::HeaderOnly | TraceKind::HeaderAndBody | TraceKind::Link(_) => {
                 // This is a normal trace, so we need to retrieve the stack size of the main
                 // interpreter frame.
                 // FIXME: For now the control point stackmap id is always 0. Though
@@ -556,6 +558,7 @@ impl<'a> Assemble<'a> {
                 .into_iter()
                 .map(|(id, (_gsnap, di))| (id, di))
                 .collect::<HashMap<_, _>>(),
+            safepoint: self.m.safepoint.as_ref().cloned(),
             sp_offset: self.ra.stack_size(),
             prologue_offset: self.prologue_offset.0,
             entry_vars: self.header_start_locs.clone(),
@@ -627,7 +630,7 @@ impl<'a> Assemble<'a> {
                 jit_ir::Inst::Guard(i) => self.cg_guard(iidx, i),
                 jit_ir::Inst::TraceHeaderStart => self.cg_header_start(),
                 jit_ir::Inst::TraceHeaderEnd => {
-                    self.cg_header_end(iidx);
+                    self.cg_header_end(iidx)?;
                     in_header = false;
                 }
                 jit_ir::Inst::TraceBodyStart => self.cg_body_start(),
@@ -2347,10 +2350,30 @@ impl<'a> Assemble<'a> {
     /// Move live values from their source location into the target location when doing a jump back
     /// to the beginning of a trace (or a jump from a side-trace to the beginning of its root
     /// trace).
-    fn write_jump_vars(&mut self, iidx: InstIdx) {
-        let (tgt_vars, src_ops) = match self.m.tracekind() {
-            TraceKind::HeaderOnly => (self.header_start_locs.clone(), self.m.trace_header_end()),
-            TraceKind::HeaderAndBody => (self.body_start_locs.clone(), self.m.trace_body_end()),
+    fn write_jump_vars(&mut self, iidx: InstIdx) -> Result<(), CompilationError> {
+        let (tgt_vars, src_ops, stack_adj) = match self.m.tracekind() {
+            TraceKind::HeaderOnly => (self.header_start_locs.clone(), self.m.trace_header_end(), 0),
+            TraceKind::HeaderAndBody => (self.body_start_locs.clone(), self.m.trace_body_end(), 0),
+            TraceKind::Link(ctr) => {
+                let mut lk = only_one_link_trace.lock();
+                if *lk {
+                    return Err(CompilationError::General("don't want to".to_owned()));
+                }
+                *lk = true;
+                drop(lk);
+
+                let ctr = Arc::clone(ctr)
+                    .as_any()
+                    .downcast::<X64CompiledTrace>()
+                    .unwrap();
+                println!("link {} {}", ctr.sp_offset, self.ra.stack_size());
+                (
+                    ctr.entry_vars().to_vec(),
+                    self.m.trace_header_end(),
+                    i32::try_from(ctr.sp_offset).unwrap()
+                        - i32::try_from(self.ra.stack_size()).unwrap(),
+                )
+            }
             TraceKind::Sidetrace(sti) => (
                 Arc::clone(sti)
                     .as_any()
@@ -2359,6 +2382,7 @@ impl<'a> Assemble<'a> {
                     .entry_vars
                     .clone(),
                 self.m.trace_header_end(),
+                0,
             ),
         };
 
@@ -2382,6 +2406,7 @@ impl<'a> Assemble<'a> {
             if let VarLocation::Register(reg) = dst {
                 match reg {
                     Register::GP(r) => {
+                        assert_ne!(r, Rq::RDI);
                         gp_regs[usize::from(r.code())] = GPConstraint::Input {
                             op: op.clone(),
                             in_ext: RegExtension::Undefined,
@@ -2413,49 +2438,56 @@ impl<'a> Assemble<'a> {
                 VarLocation::Stack {
                     frame_off: off_dst,
                     size: size_dst,
-                } => match src {
-                    VarLocation::Register(Register::GP(reg)) => {
-                        assert_ne!(reg, spare_reg);
-                        match size_dst {
-                            8 => dynasm!(self.asm;
-                                mov QWORD [rbp - i32::try_from(off_dst).unwrap()], Rq(reg.code())
-                            ),
-                            4 => dynasm!(self.asm;
-                                mov DWORD [rbp - i32::try_from(off_dst).unwrap()], Rd(reg.code())
-                            ),
-                            _ => todo!(),
+                } => {
+                    println!(
+                        "{off_dst} {stack_adj} {}",
+                        i32::try_from(off_dst).unwrap() - stack_adj
+                    );
+                    let off_dst = i32::try_from(off_dst).unwrap() - stack_adj;
+                    match src {
+                        VarLocation::Register(Register::GP(reg)) => {
+                            assert_ne!(reg, spare_reg);
+                            match size_dst {
+                                8 => dynasm!(self.asm;
+                                    mov QWORD [rbp - off_dst], Rq(reg.code())
+                                ),
+                                4 => dynasm!(self.asm;
+                                    mov DWORD [rbp - off_dst], Rd(reg.code())
+                                ),
+                                _ => todo!(),
+                            }
                         }
-                    }
-                    VarLocation::ConstInt { bits, v } => match bits {
-                        32 => dynasm!(self.asm;
-                            mov DWORD [rbp - i32::try_from(off_dst).unwrap()], v as i32
-                        ),
-                        8 => dynasm!(self.asm;
-                                mov BYTE [rbp - i32::try_from(off_dst).unwrap()], v as i8),
-                        x => todo!("{x}"),
-                    },
-                    VarLocation::ConstPtr(v) => {
-                        dynasm!(self.asm
-                            ; mov Rq(spare_reg.code()), QWORD v as i64
-                            ; mov QWORD [rbp - i32::try_from(off_dst).unwrap()], Rq(spare_reg.code())
-                        );
-                    }
-                    VarLocation::Stack {
-                        frame_off: off_src,
-                        size: size_src,
-                    } => match size_src {
-                        8 => dynasm!(self.asm
-                            ; mov Rq(spare_reg.code()), QWORD [rbp - i32::try_from(off_src).unwrap()]
-                            ; mov QWORD [rbp - i32::try_from(off_dst).unwrap()], Rq(spare_reg.code())
-                        ),
-                        4 => dynasm!(self.asm
-                            ; mov Rd(spare_reg.code()), DWORD [rbp - i32::try_from(off_src).unwrap()]
-                            ; mov DWORD [rbp - i32::try_from(off_dst).unwrap()], Rd(spare_reg.code())
-                        ),
+                        VarLocation::ConstInt { bits, v } => match bits {
+                            32 => dynasm!(self.asm;
+                                mov DWORD [rbp - off_dst], v as i32
+                            ),
+                            8 => dynasm!(self.asm;
+                                mov BYTE [rbp - off_dst], v as i8),
+                            x => todo!("{x}"),
+                        },
+                        VarLocation::ConstPtr(v) => {
+                            dynasm!(self.asm
+                                ; mov Rq(spare_reg.code()), QWORD v as i64
+                                ; mov QWORD [rbp - off_dst], Rq(spare_reg.code())
+                            );
+                        }
+                        VarLocation::Stack {
+                            frame_off: off_src,
+                            size: size_src,
+                        } => match size_src {
+                            8 => dynasm!(self.asm
+                                ; mov Rq(spare_reg.code()), QWORD [rbp - i32::try_from(off_src).unwrap()]
+                                ; mov QWORD [rbp - off_dst], Rq(spare_reg.code())
+                            ),
+                            4 => dynasm!(self.asm
+                                ; mov Rd(spare_reg.code()), DWORD [rbp - i32::try_from(off_src).unwrap()]
+                                ; mov DWORD [rbp - off_dst], Rd(spare_reg.code())
+                            ),
+                            e => todo!("{:?}", e),
+                        },
                         e => todo!("{:?}", e),
-                    },
-                    e => todo!("{:?}", e),
-                },
+                    }
+                }
                 VarLocation::Direct { .. } => {
                     // Direct locations are read-only, so it doesn't make sense to write to
                     // them. This is likely a case where the direct value has been moved
@@ -2476,6 +2508,8 @@ impl<'a> Assemble<'a> {
             gp_regs.try_into().unwrap(),
             fp_regs.try_into().unwrap(),
         );
+
+        Ok(())
     }
 
     fn cg_body_end(&mut self, iidx: InstIdx) {
@@ -2528,7 +2562,7 @@ impl<'a> Assemble<'a> {
                     // register since it's being used as an argument to the control point.
                     ; jmp rdi);
             }
-            TraceKind::HeaderOnly | TraceKind::HeaderAndBody => panic!(),
+            TraceKind::HeaderOnly | TraceKind::HeaderAndBody | TraceKind::Link(_) => unreachable!(),
         }
     }
 
@@ -2551,15 +2585,16 @@ impl<'a> Assemble<'a> {
             TraceKind::HeaderAndBody => {
                 dynasm!(self.asm; ->reentry:);
             }
+            TraceKind::Link(_) => (),
             TraceKind::Sidetrace(_) => todo!(),
         }
         self.prologue_offset = self.asm.offset();
     }
 
-    fn cg_header_end(&mut self, iidx: InstIdx) {
+    fn cg_header_end(&mut self, iidx: InstIdx) -> Result<(), CompilationError> {
         match self.m.tracekind() {
             TraceKind::HeaderOnly => {
-                self.write_jump_vars(iidx);
+                self.write_jump_vars(iidx)?;
                 dynasm!(self.asm; jmp ->tloop_start);
             }
             TraceKind::HeaderAndBody => {
@@ -2613,8 +2648,29 @@ impl<'a> Assemble<'a> {
                     }
                 }
             }
+            TraceKind::Link(ctr) => {
+                let ctr = Arc::clone(ctr)
+                    .as_any()
+                    .downcast::<X64CompiledTrace>()
+                    .unwrap();
+                // The end of a side-trace. Map live variables of this side-trace to the entry variables of
+                // the root parent trace, then jump to it.
+                self.write_jump_vars(iidx)?;
+                self.ra.align_stack(SYSV_CALL_STACK_ALIGN);
+
+                dynasm!(self.asm
+                    // Reset rsp to the root trace's frame.
+                    ; mov rsp, rbp
+                    ; sub rsp, i32::try_from(ctr.sp_offset).unwrap()
+                    ; mov rdi, QWORD ctr.entry() as i64
+                    // We can safely use RDI here, since the root trace won't expect live variables in this
+                    // register since it's being used as an argument to the control point.
+                    ; jmp rdi);
+            }
             TraceKind::Sidetrace(_) => panic!(),
         }
+
+        Ok(())
     }
 
     fn cg_body_start(&mut self) {
@@ -3023,6 +3079,7 @@ pub(super) struct X64CompiledTrace {
     ctrid: CompiledTraceId,
     // Reference to the meta-tracer required for side tracing.
     mt: Arc<MT>,
+    safepoint: Option<Arc<DeoptSafepoint>>,
     /// The executable code itself.
     buf: ExecutableBuffer,
     /// Deoptimisation info: maps a [GuardIdx] to [DeoptInfo].

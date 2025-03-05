@@ -12,7 +12,7 @@
 //!      subsumes the functionality of `dead_code.rs`, so if you use this module for you don't need
 //!      to use `dead_code.rs` as well.
 
-use super::{Register, VarLocation};
+use super::{Register, VarLocation, X64CompiledTrace};
 use crate::compile::jitc_yk::{
     codegen::x64::{ARG_FP_REGS, ARG_GP_REGS},
     jit_ir::{
@@ -87,6 +87,18 @@ impl<'a> RevAnalyse<'a> {
                 // We don't care where the register allocator ends at the end of the header, so we
                 // don't propagate backwards from `TraceHeaderEnd`.
             }
+            TraceKind::Link(ctr) => {
+                let ctr = Arc::clone(ctr)
+                    .as_any()
+                    .downcast::<X64CompiledTrace>()
+                    .unwrap();
+                assert_eq!(ctr.entry_vars.len(), self.m.trace_header_end().len());
+                for (vloc, jump_op) in ctr.entry_vars().iter().zip(self.m.trace_header_end()) {
+                    if let VarLocation::Register(reg) = *vloc {
+                        self.push_reg_hint_fixed(jump_op.unpack(self.m), reg);
+                    }
+                }
+            }
             TraceKind::Sidetrace(sti) => {
                 let sti = Arc::clone(sti)
                     .as_any()
@@ -108,7 +120,7 @@ impl<'a> RevAnalyse<'a> {
         // ...and then we perform the rest of the reverse analysis.
         let mut iter = self.m.iter_skipping_insts().rev();
         match self.m.tracekind() {
-            TraceKind::HeaderOnly | TraceKind::Sidetrace(_) => {
+            TraceKind::HeaderOnly | TraceKind::Sidetrace(_) | TraceKind::Link(_) => {
                 for (iidx, inst) in self.m.iter_skipping_insts().rev() {
                     self.analyse(iidx, inst);
                 }

@@ -38,6 +38,7 @@ impl Module {
                     );
                 }
             }
+            super::TraceKind::Link(_) => (),
             super::TraceKind::Sidetrace(_) => (),
         }
 

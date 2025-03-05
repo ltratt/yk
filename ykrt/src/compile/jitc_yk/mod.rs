@@ -129,6 +129,7 @@ impl<Register: Send + Sync + 'static> JITCYk<Register> {
         mt: Arc<MT>,
         aottrace_iter: Box<dyn AOTTraceIterator>,
         sti: Option<Arc<dyn SideTraceInfo>>,
+        linktr: Option<Arc<dyn CompiledTrace>>,
         hl: Arc<Mutex<HotLocation>>,
         promotions: Box<[u8]>,
         debug_strs: Vec<String>,
@@ -145,8 +146,15 @@ impl<Register: Send + Sync + 'static> JITCYk<Register> {
 
         let sti = sti.map(|s| s.as_any().downcast::<YkSideTraceInfo<Register>>().unwrap());
 
-        let mut jit_mod =
-            trace_builder::build(&mt, aot_mod, aottrace_iter, sti, promotions, debug_strs)?;
+        let mut jit_mod = trace_builder::build(
+            &mt,
+            aot_mod,
+            aottrace_iter,
+            sti,
+            linktr,
+            promotions,
+            debug_strs,
+        )?;
 
         if should_log_ir(IRPhase::PreOpt) {
             log_ir(&format!(
@@ -192,8 +200,9 @@ impl<Register: Send + Sync + 'static> Compiler for JITCYk<Register> {
         hl: Arc<Mutex<HotLocation>>,
         promotions: Box<[u8]>,
         debug_strs: Vec<String>,
+        linktr: Option<Arc<dyn CompiledTrace>>,
     ) -> Result<Arc<dyn CompiledTrace>, CompilationError> {
-        self.compile(mt, aottrace_iter, None, hl, promotions, debug_strs)
+        self.compile(mt, aottrace_iter, None, linktr, hl, promotions, debug_strs)
     }
 
     fn sidetrace_compile(
@@ -205,7 +214,15 @@ impl<Register: Send + Sync + 'static> Compiler for JITCYk<Register> {
         promotions: Box<[u8]>,
         debug_strs: Vec<String>,
     ) -> Result<Arc<dyn CompiledTrace>, CompilationError> {
-        self.compile(mt, aottrace_iter, Some(sti), hl, promotions, debug_strs)
+        self.compile(
+            mt,
+            aottrace_iter,
+            Some(sti),
+            None,
+            hl,
+            promotions,
+            debug_strs,
+        )
     }
 }
 

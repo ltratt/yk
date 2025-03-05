@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     aotsmp::AOT_STACKMAPS,
-    compile::CompilationError,
+    compile::{CompilationError, CompiledTrace},
     log::stats::TimingState,
     mt::MT,
     trace::{AOTTraceIterator, AOTTraceIteratorError, TraceAction},
@@ -128,8 +128,21 @@ impl<Register: Send + Sync + 'static> TraceBuilder<Register> {
                     .map(|x| x.safepoint_arc().unwrap())
                     .unwrap()
             }
+            // TraceKind::Link(ctr) => ctr.safepoint().as_ref().map(|x| Arc::clone(x)).unwrap(),
+            TraceKind::Link(_) => {
+                // Find the control point call to retrieve the live variables from its safepoint.
+                //
+                // FIXME: Stash the location at IR lowering time, instead of searching at runtime.
+                blk.insts
+                    .iter()
+                    .rev()
+                    .find(|x| x.is_control_point(self.aot_mod))
+                    .map(|x| x.safepoint_arc().unwrap())
+                    .unwrap()
+            }
             TraceKind::Sidetrace(_) => unreachable!(),
         };
+        self.jit_mod.safepoint = Some(Arc::clone(&safepoint));
 
         let (rec, _) = AOT_STACKMAPS
             .as_ref()
@@ -1299,7 +1312,7 @@ impl<Register: Send + Sync + 'static> TraceBuilder<Register> {
         }
 
         match self.jit_mod.tracekind() {
-            TraceKind::HeaderOnly | TraceKind::HeaderAndBody => {
+            TraceKind::HeaderOnly | TraceKind::HeaderAndBody | TraceKind::Link(_) => {
                 // Find the block containing the control point call. This is the (sole) predecessor of the
                 // first (guaranteed mappable) block in the trace. Note that empty traces are handled in
                 // the tracing phase so the `unwrap` is safe.
@@ -1443,11 +1456,11 @@ impl<Register: Send + Sync + 'static> TraceBuilder<Register> {
             self.jit_mod.push_header_end_var(jit_op.clone());
         }
         match self.jit_mod.tracekind() {
+            TraceKind::HeaderAndBody | TraceKind::HeaderOnly | TraceKind::Link(_) => {
+                self.jit_mod.push(jit_ir::Inst::TraceHeaderEnd)?;
+            }
             TraceKind::Sidetrace(_) => {
                 self.jit_mod.push(jit_ir::Inst::SidetraceEnd)?;
-            }
-            TraceKind::HeaderAndBody | TraceKind::HeaderOnly => {
-                self.jit_mod.push(jit_ir::Inst::TraceHeaderEnd)?;
             }
         }
 
@@ -1471,11 +1484,14 @@ pub(super) fn build<Register: Send + Sync + 'static>(
     aot_mod: &'static Module,
     ta_iter: Box<dyn AOTTraceIterator>,
     sti: Option<Arc<YkSideTraceInfo<Register>>>,
+    linktr: Option<Arc<dyn CompiledTrace>>,
     promotions: Box<[u8]>,
     debug_strs: Vec<String>,
 ) -> Result<jit_ir::Module, CompilationError> {
     let tracekind = if let Some(x) = sti {
         TraceKind::Sidetrace(x)
+    } else if let Some(x) = linktr {
+        TraceKind::Link(x)
     } else {
         TraceKind::HeaderOnly
     };

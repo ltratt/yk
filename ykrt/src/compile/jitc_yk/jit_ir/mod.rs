@@ -97,9 +97,9 @@ mod parser;
 #[cfg(any(debug_assertions, test))]
 mod well_formed;
 
-use super::aot_ir;
+use super::aot_ir::{self, DeoptSafepoint};
 use crate::{
-    compile::{jitc_yk::arbbitint::ArbBitInt, CompilationError, SideTraceInfo},
+    compile::{jitc_yk::arbbitint::ArbBitInt, CompilationError, CompiledTrace, SideTraceInfo},
     mt::CompiledTraceId,
 };
 use indexmap::IndexSet;
@@ -118,7 +118,7 @@ use ykaddr::addr::symbol_to_ptr;
 pub(crate) use super::aot_ir::{BinOp, FloatPredicate, FloatTy, Predicate};
 
 /// What kind of trace does this module represent?
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) enum TraceKind {
     /// A trace which contains only a header: the trace must loop back to the very start every
     /// time.
@@ -127,6 +127,18 @@ pub(crate) enum TraceKind {
     HeaderAndBody,
     /// A sidetrace: the trace must loop back to the root of the trace tree.
     Sidetrace(Arc<dyn SideTraceInfo>),
+    Link(Arc<dyn CompiledTrace>),
+}
+
+impl std::fmt::Debug for TraceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TraceKind::HeaderOnly => write!(f, "HeaderOnly"),
+            TraceKind::HeaderAndBody => write!(f, "HeaderAndBody"),
+            TraceKind::Sidetrace(_) => write!(f, "Sidetrace"),
+            TraceKind::Link(_) => write!(f, "Link"),
+        }
+    }
 }
 
 /// The `Module` is the top-level container for JIT IR.
@@ -146,6 +158,7 @@ pub(crate) struct Module {
     ///
     /// See the [Self::ctr_id] method for details.
     ctr_id: CompiledTraceId,
+    pub(crate) safepoint: Option<Arc<DeoptSafepoint>>,
     /// The IR trace as a linear sequence of instructions.
     insts: Vec<Inst>,
     /// The arguments pool for [CallInst]s. Indexed by [ArgsIdx].
@@ -294,6 +307,7 @@ impl Module {
         Ok(Self {
             tracekind,
             ctr_id,
+            safepoint: None,
             insts: Vec::new(),
             args: Vec::new(),
             consts,
@@ -2134,7 +2148,15 @@ impl fmt::Display for DisplayableInst<'_> {
             }
             Inst::TraceHeaderEnd => {
                 // Just marks a location, so we format it to look like a label.
-                write!(f, "header_end [")?;
+                match self.m.tracekind() {
+                    TraceKind::HeaderOnly | TraceKind::HeaderAndBody => {
+                        write!(f, "header_end [")?;
+                    }
+                    TraceKind::Link(_) => {
+                        write!(f, "link [")?;
+                    }
+                    TraceKind::Sidetrace(_) => unreachable!(),
+                }
                 for var in &self.m.trace_header_end {
                     write!(f, "{}", var.unpack(self.m).display(self.m))?;
                     if var != self.m.trace_header_end.last().unwrap() {

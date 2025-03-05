@@ -55,9 +55,9 @@ impl Opt {
             }
             // If we hit this case, someone's tried to run the optimiser twice.
             TraceKind::HeaderAndBody => unreachable!(),
-            // If this is a sidetrace, we perform optimisations up to, but not including, loop
-            // peeling.
-            TraceKind::Sidetrace(_) => false,
+            // If this is a sidetrace or link trace, we perform optimisations up to, but not
+            // including, loop peeling.
+            TraceKind::Link(_) | TraceKind::Sidetrace(_) => false,
         };
 
         // Note that since we will apply loop peeling here, the list of instructions grows as this
