@@ -442,6 +442,7 @@ impl MT {
                     .unwrap()
                     .get(usize::try_from(smid).unwrap());
                 let mut rsp = unsafe { frameaddr.byte_sub(usize::try_from(rec.size).unwrap()) };
+                assert!(pinfo.hasfp);
                 if pinfo.hasfp {
                     rsp = unsafe { rsp.byte_add(REG64_SIZE) };
                 }

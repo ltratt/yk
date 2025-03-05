@@ -2351,9 +2351,9 @@ impl<'a> Assemble<'a> {
     /// to the beginning of a trace (or a jump from a side-trace to the beginning of its root
     /// trace).
     fn write_jump_vars(&mut self, iidx: InstIdx) -> Result<(), CompilationError> {
-        let (tgt_vars, src_ops, stack_adj) = match self.m.tracekind() {
-            TraceKind::HeaderOnly => (self.header_start_locs.clone(), self.m.trace_header_end(), 0),
-            TraceKind::HeaderAndBody => (self.body_start_locs.clone(), self.m.trace_body_end(), 0),
+        let (tgt_vars, src_ops) = match self.m.tracekind() {
+            TraceKind::HeaderOnly => (self.header_start_locs.clone(), self.m.trace_header_end()),
+            TraceKind::HeaderAndBody => (self.body_start_locs.clone(), self.m.trace_body_end()),
             TraceKind::Link(ctr) => {
                 let mut lk = only_one_link_trace.lock();
                 if *lk {
@@ -2366,12 +2366,9 @@ impl<'a> Assemble<'a> {
                     .as_any()
                     .downcast::<X64CompiledTrace>()
                     .unwrap();
-                println!("link {} {}", ctr.sp_offset, self.ra.stack_size());
                 (
                     ctr.entry_vars().to_vec(),
                     self.m.trace_header_end(),
-                    i32::try_from(ctr.sp_offset).unwrap()
-                        - i32::try_from(self.ra.stack_size()).unwrap(),
                 )
             }
             TraceKind::Sidetrace(sti) => (
@@ -2382,7 +2379,6 @@ impl<'a> Assemble<'a> {
                     .entry_vars
                     .clone(),
                 self.m.trace_header_end(),
-                0,
             ),
         };
 
@@ -2439,11 +2435,7 @@ impl<'a> Assemble<'a> {
                     frame_off: off_dst,
                     size: size_dst,
                 } => {
-                    println!(
-                        "{off_dst} {stack_adj} {}",
-                        i32::try_from(off_dst).unwrap() - stack_adj
-                    );
-                    let off_dst = i32::try_from(off_dst).unwrap() - stack_adj;
+                    let off_dst = i32::try_from(off_dst).unwrap();
                     match src {
                         VarLocation::Register(Register::GP(reg)) => {
                             assert_ne!(reg, spare_reg);
