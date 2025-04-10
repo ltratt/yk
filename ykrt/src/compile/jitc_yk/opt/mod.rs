@@ -2137,6 +2137,43 @@ mod test {
     }
 
     #[test]
+    fn opt_peeling_stores() {
+        Module::assert_ir_transform_eq(
+            "
+          entry:
+            %0: ptr = param reg
+            %1: i8 = param reg
+            header_start [%0, %1]
+            *%0 = 1i8
+            %4: i8 = add %1, 1i8
+            %5: ptr = ptr_add %0, 4
+            *%5 = %4
+            header_end [%0, %4]
+        ",
+            |m| opt(m).unwrap(),
+            "
+          ...
+          entry:
+            %0: ptr = param ...
+            %1: i8 = param ...
+            header_start [%0, %1]
+            *%0 = 1i8
+            %4: i8 = add %1, 1i8
+            %5: ptr = ptr_add %0, 4
+            *%5 = %4
+            header_end [%0, %4]
+            %8: ptr = param ...
+            %9: i8 = param ...
+            body_start [%8, %9]
+            %12: i8 = add %9, 1i8
+            %13: ptr = ptr_add %8, 4
+            *%13 = %12
+            body_end [%8, %12]
+        ",
+        );
+    }
+
+    #[test]
     fn opt_dead_load() {
         Module::assert_ir_transform_eq(
             "

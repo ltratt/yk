@@ -17,7 +17,6 @@ pub(super) enum Address {
     /// values in bytes.
     PtrPlusOff(InstIdx, i32),
     /// This address is a constant.
-    #[allow(unused)]
     Const(usize),
 }
 
@@ -70,12 +69,16 @@ impl HeapValues {
         for (k, v) in self.hv.iter_mut() {
             let k = match k {
                 Address::PtrPlusOff(iidx, off) => {
+                    assert_ne!(map[usize::from(*iidx)], InstIdx::max());
                     Address::PtrPlusOff(map[usize::from(*iidx)], *off)
                 }
                 Address::Const(cidx) => Address::Const(*cidx),
             };
             let v = match v {
-                Operand::Var(_) => continue,
+                Operand::Var(iidx) => {
+                    assert_ne!(map[usize::from(*iidx)], InstIdx::max());
+                    continue
+                }
                 Operand::Const(cidx) => Operand::Const(*cidx),
             };
             new.insert(k, v);
