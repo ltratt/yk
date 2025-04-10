@@ -77,7 +77,7 @@ impl HeapValues {
             let v = match v {
                 Operand::Var(iidx) => {
                     assert_ne!(map[usize::from(*iidx)], InstIdx::max());
-                    continue
+                    continue;
                 }
                 Operand::Const(cidx) => Operand::Const(*cidx),
             };
