@@ -75,7 +75,7 @@ impl HeapValues {
                 Address::Const(cidx) => Address::Const(*cidx),
             };
             let v = match v {
-                Operand::Var(iidx) => continue,
+                Operand::Var(_) => continue,
                 Operand::Const(cidx) => Operand::Const(*cidx),
             };
             new.insert(k, v);
