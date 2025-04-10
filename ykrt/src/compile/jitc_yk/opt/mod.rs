@@ -136,6 +136,8 @@ impl Opt {
             }
         }
 
+        self.an.heapvalue_map(&iidx_map);
+
         // Create a fresh `instll`. Normal CSE in the body (a) can't possibly reference the header
         // (b) the number of instructions in the `instll`-for-the-header is wrong as a result of
         // peeling. So create a fresh `instll`.

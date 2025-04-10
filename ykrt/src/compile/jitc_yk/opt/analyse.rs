@@ -81,6 +81,10 @@ impl Analyse {
         }
     }
 
+    pub(super) fn heapvalue_map(&self, map: &[InstIdx]) {
+        self.heapvalues.borrow_mut().map_iidxs(map);
+    }
+
     /// What, if any, is the currently known value of `bytesize` bytes stored at `addr`?
     pub(super) fn heapvalue(&self, m: &Module, addr: Address, bytesize: usize) -> Option<Operand> {
         self.heapvalues.borrow_mut().get(m, addr, bytesize)

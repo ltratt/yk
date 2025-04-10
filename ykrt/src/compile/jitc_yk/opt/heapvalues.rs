@@ -65,6 +65,24 @@ impl HeapValues {
         HeapValues { hv: HashMap::new() }
     }
 
+    pub(super) fn map_iidxs(&mut self, map: &[InstIdx]) {
+        let mut new = HashMap::with_capacity(self.hv.len());
+        for (k, v) in self.hv.iter_mut() {
+            let k = match k {
+                Address::PtrPlusOff(iidx, off) => {
+                    Address::PtrPlusOff(map[usize::from(*iidx)], *off)
+                }
+                Address::Const(cidx) => Address::Const(*cidx),
+            };
+            let v = match v {
+                Operand::Var(iidx) => continue,
+                Operand::Const(cidx) => Operand::Const(*cidx),
+            };
+            new.insert(k, v);
+        }
+        self.hv = new;
+    }
+
     /// What is the currently known value at `addr` of `bytesize` bytes? Returns `None` if no value
     /// of that size is known at that address.
     pub(super) fn get(&self, m: &Module, addr: Address, bytesize: usize) -> Option<Operand> {
