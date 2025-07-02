@@ -3,6 +3,7 @@
 #![cfg_attr(test, feature(test))]
 #![feature(assert_matches)]
 #![feature(let_chains)]
+#![feature(unsigned_signed_diff)]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::upper_case_acronyms)]

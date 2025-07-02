@@ -1885,6 +1885,14 @@ impl Ty {
         DisplayableTy { type_: self, m }
     }
 
+    pub(crate) fn bitw(&self) -> u32 {
+        match self {
+            Self::Integer(it) => it.bitw(),
+            Self::Ptr => todo!(),
+            _ => todo!(),
+        }
+    }
+
     pub(crate) fn bytew(&self) -> u32 {
         match self {
             Self::Integer(it) => it.bytew(),

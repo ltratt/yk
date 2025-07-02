@@ -6,11 +6,15 @@ edition = "2021"
 license = "Apache-2.0 OR MIT"
 
 [dependencies]
+array-concat = "0.5.5"
 atomic_enum = "0.3.0"
 byteorder = "1.4.3"
+declarative_enum_dispatch = "0.1.2"
 deku = { version = "0.18.1", features = ["std"] }
 dynasmrt = "3.0.0"
+iced-x86 = { version = "1.21.0", features = ["encoder"] }
 indexmap = "2.2.6"
+index_vec = "0.1.4"
 libc = "0.2.148"
 memmap2 = "0.9"
 num-traits = "0.2.16"

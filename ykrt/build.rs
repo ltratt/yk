@@ -13,6 +13,8 @@ pub fn main() {
     // Always compile in yk's default JIT compiler.
     println!("cargo::rustc-cfg=jitc_yk");
     println!("cargo::rustc-check-cfg=cfg(jitc_yk)");
+    println!("cargo::rustc-cfg=jitc_j2");
+    println!("cargo::rustc-check-cfg=cfg(jitc_j2)");
 
     println!("cargo::rustc-check-cfg=cfg(tracer_hwt)");
     println!("cargo::rustc-check-cfg=cfg(tracer_swt)");

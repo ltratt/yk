@@ -955,7 +955,8 @@ impl TraceBuilder {
             // sign extend it up (or truncate it down) to the right size. To date I've been unable
             // to get clang to emit code that would require an extend or truncate, so for now it's
             // a todo.
-            if num_elems.byte_size(&self.jit_mod) * 8 != self.aot_mod.ptr_off_bitsize().into() {
+            if num_elems.byte_size(&self.jit_mod) * 8 != usize::from(self.aot_mod.ptr_off_bitsize())
+            {
                 todo!();
             }
             let elem_size = u16::try_from(*elem_size).map_err(|_| {

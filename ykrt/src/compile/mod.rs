@@ -15,6 +15,8 @@ use thiserror::Error;
 
 pub(crate) mod guard;
 pub(crate) use guard::{Guard, GuardIdx};
+#[cfg(jitc_j2)]
+pub mod j2;
 #[cfg(jitc_yk)]
 pub mod jitc_yk;
 
@@ -69,6 +71,11 @@ pub(crate) trait Compiler: Send + Sync {
 }
 
 pub(crate) fn default_compiler() -> Result<Arc<dyn Compiler>, Box<dyn Error>> {
+    #[cfg(jitc_j2)]
+    if std::env::var("YK_JITC").is_ok_and(|x| x == "j2") {
+        return Ok(j2::J1::new()?);
+    }
+
     #[cfg(jitc_yk)]
     return Ok(jitc_yk::JITCYk::new()?);
 
