@@ -238,6 +238,7 @@ impl<'a, Reg: RegT + 'static> AotToHir<'a, Reg> {
         // further processing of the trace should occur.
         let termendk = self.p_blocks()?;
         match &termendk {
+            TraceEndKind::Call => (),
             TraceEndKind::Return(_) => (),
             TraceEndKind::Term => {
                 assert!(self.promotions_iter.next().is_none());
@@ -279,6 +280,7 @@ impl<'a, Reg: RegT + 'static> AotToHir<'a, Reg> {
             } => {
                 let (entry, tys) = self.opt.build()?;
                 match termendk {
+                    TraceEndKind::Call => todo!(),
                     TraceEndKind::Return(exit_safepoint) => (
                         hir::TraceStart::ControlPoint { entry_safepoint },
                         hir::TraceEnd::Return {
@@ -295,6 +297,14 @@ impl<'a, Reg: RegT + 'static> AotToHir<'a, Reg> {
                 }
             }
             BuildModKind::Loop { entry_safepoint } => match termendk {
+                TraceEndKind::Call => {
+                    let (entry, tys) = self.opt.build()?;
+                    (
+                        hir::TraceStart::ControlPoint { entry_safepoint },
+                        hir::TraceEnd::Call { entry },
+                        tys,
+                    )
+                }
                 TraceEndKind::Return(exit_safepoint) => {
                     let (entry, tys) = self.opt.build()?;
                     (
@@ -324,6 +334,15 @@ impl<'a, Reg: RegT + 'static> AotToHir<'a, Reg> {
             } => {
                 let (entry, tys) = self.opt.build()?;
                 match termendk {
+                    TraceEndKind::Call => (
+                        hir::TraceStart::Guard {
+                            args_vlocs,
+                            src_ctr,
+                            src_gidx,
+                        },
+                        hir::TraceEnd::Call { entry },
+                        tys,
+                    ),
                     TraceEndKind::Return(exit_safepoint) => (
                         hir::TraceStart::Guard {
                             args_vlocs,
@@ -877,6 +896,7 @@ impl<'a, Reg: RegT + 'static> AotToHir<'a, Reg> {
                     CallProcessedKind::Ignored => (),
                     CallProcessedKind::Inlined => continue,
                     CallProcessedKind::Outlined => (),
+                    CallProcessedKind::TraceTerm => return Ok(TraceEndKind::Call),
                 },
                 Inst::Cast { .. } => self.p_cast(pc.clone(), inst)?,
                 Inst::CondBr { .. } => self.p_condbr(pc.clone(), bid, inst)?,
@@ -890,6 +910,7 @@ impl<'a, Reg: RegT + 'static> AotToHir<'a, Reg> {
                     CallProcessedKind::Ignored => (),
                     CallProcessedKind::Inlined => continue,
                     CallProcessedKind::Outlined => (),
+                    CallProcessedKind::TraceTerm => return Ok(TraceEndKind::Call),
                 },
                 Inst::InsertValue { .. } => todo!(),
                 Inst::Load { .. } => self.p_load(pc.clone(), inst)?,
@@ -1115,7 +1136,12 @@ impl<'a, Reg: RegT + 'static> AotToHir<'a, Reg> {
             {
                 let const_iidx = self.promotion_data_to_const(self.am.type_(fty.ret_ty()))?;
                 self.frames.last_mut().unwrap().set_local(iid, const_iidx);
-                self.outline_until(bid)?;
+                let r = self.outline_until(bid)?;
+                if r {
+                    // We probably don't want to allow idempotent functions to hit his case, but I
+                    // haven't yet thought carefully about it.
+                    todo!();
+                }
                 return Ok(CallProcessedKind::Outlined);
             }
             for _ in 0..self.am.type_(fty.ret_ty()).bytew() {
@@ -1205,10 +1231,18 @@ impl<'a, Reg: RegT + 'static> AotToHir<'a, Reg> {
             if *self.opt.ty(*rtn_tyidx) == hir::Ty::Void {
                 self.opt.feed_void(inst)?;
             } else {
-                self.push_inst_and_link_local(iid, inst)?;
+                self.push_inst_and_link_local(iid.clone(), inst)?;
             }
-            self.outline_until(bid)?;
-            Ok(CallProcessedKind::Outlined)
+            if self.outline_until(bid)? {
+                let i1_tyidx = self.opt.push_ty(hir::Ty::Int(1))?;
+                let ciidx =
+                    self.const_to_iidx(i1_tyidx, hir::ConstKind::Int(ArbBitInt::from_u64(1, 0)))?;
+                self.push_guard(bid, iid, true, ciidx, safepoint.unwrap(), None)?;
+                self.opt.feed_void(hir::Term(Vec::new()).into())?;
+                Ok(CallProcessedKind::TraceTerm)
+            } else {
+                Ok(CallProcessedKind::Outlined)
+            }
         }
     }
 
@@ -1263,15 +1297,23 @@ impl<'a, Reg: RegT + 'static> AotToHir<'a, Reg> {
         if *self.opt.ty(*rtn_tyidx) == hir::Ty::Void {
             self.opt.feed_void(inst.into())?;
         } else {
-            self.push_inst_and_link_local(iid, inst)?;
+            self.push_inst_and_link_local(iid.clone(), inst)?;
         }
-        self.outline_until(bid)?;
-        Ok(CallProcessedKind::Outlined)
+        if self.outline_until(bid)? {
+            let i1_tyidx = self.opt.push_ty(hir::Ty::Int(1))?;
+            let ciidx =
+                self.const_to_iidx(i1_tyidx, hir::ConstKind::Int(ArbBitInt::from_u64(1, 0)))?;
+            self.push_guard(bid, iid, true, ciidx, safepoint, None)?;
+            self.opt.feed_void(hir::Term(Vec::new()).into())?;
+            Ok(CallProcessedKind::TraceTerm)
+        } else {
+            Ok(CallProcessedKind::Outlined)
+        }
     }
 
-    /// Outline until the successor block to `bid` is encountered. Returns `Err` if irregular
-    /// control flow is detected.
-    fn outline_until(&mut self, cur_bid: BBlockId) -> Result<(), CompilationError> {
+    /// Outline until the successor block to `bid` is encountered. Returns Ok(true) if the trace
+    /// terminated while outlining.
+    fn outline_until(&mut self, cur_bid: BBlockId) -> Result<bool, CompilationError> {
         // Now we skip over all the blocks in this call.
         let tgt_bid = match self.am.bblock(&cur_bid).insts().last().unwrap() {
             Inst::Br { succ } => {
@@ -1294,10 +1336,7 @@ impl<'a, Reg: RegT + 'static> AotToHir<'a, Reg> {
         loop {
             let ta = {
                 let Some(Ok(ta)) = self.ta_iter.peek() else {
-                    return Err(CompilationError::General(
-                "irregular control flow detected (trace ended with outline successor pending)"
-                    .into(),
-            ));
+                    return Ok(true);
                 };
                 ta.to_owned()
             };
@@ -1346,7 +1385,7 @@ impl<'a, Reg: RegT + 'static> AotToHir<'a, Reg> {
             prev_bid = cnd_bid;
             self.ta_iter.next();
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Check that `cnd_bid` is a successor to `prev_bid` returning `Err` otherwise.
@@ -2099,10 +2138,14 @@ enum CallProcessedKind {
     Inlined,
     /// We outlined the call.
     Outlined,
+    /// We encountered a call which terminates this trace.
+    TraceTerm,
 }
 
 /// How did the trace end?
+#[derive(Debug)]
 enum TraceEndKind {
+    Call,
     /// It looped or coupled to another trace.
     Term,
     /// It returned to an outer caller.

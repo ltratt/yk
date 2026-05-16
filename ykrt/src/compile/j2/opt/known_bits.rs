@@ -190,13 +190,16 @@ impl KnownBits {
         if let Some(cond_b) = self.as_knownbits(opt, cond)
             && cond_b.all_known()
         {
-            // Contradictions should have been spotted before we get to here.
             let x = cond_b.as_arbbitint();
-            assert!(
-                (expect && x.to_zero_ext_u8() == Some(1))
-                    || (!expect && x.to_zero_ext_u8() == Some(0))
-            );
-            return OptOutcome::NotNeeded;
+            if (expect && x.to_zero_ext_u8() == Some(1))
+                || (!expect && x.to_zero_ext_u8() == Some(0))
+            {
+                return OptOutcome::NotNeeded;
+            } else {
+                // We've encountered a contradiction. There are valid reasons for those to exist,
+                // and we want to make sure we don't mess with them.
+                return OptOutcome::Rewritten(inst.into());
+            }
         }
         if expect
             && let cond_inst @ Inst::ICmp(ICmp {

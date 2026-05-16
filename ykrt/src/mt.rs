@@ -963,19 +963,14 @@ impl MT {
                         let Some((parent_ctr, gid)) = gtrace else {
                             panic!()
                         };
-                        if is_callee_frame(frameaddr, *tracing_frameaddr) {
-                            parent_ctr.guard(*gid).trace_or_compile_failed(self);
-                            TransitionControlPoint::AbortTracing
-                        } else {
-                            let gid = *gid;
-                            let parent_ctr = Arc::clone(parent_ctr);
-                            TransitionControlPoint::StopSideTracing {
-                                trid: *tracing_trid,
-                                gid,
-                                parent_ctr,
-                                coupler_tid: Some(coupler_tid),
-                                start: false,
-                            }
+                        let gid = *gid;
+                        let parent_ctr = Arc::clone(parent_ctr);
+                        TransitionControlPoint::StopSideTracing {
+                            trid: *tracing_trid,
+                            gid,
+                            parent_ctr,
+                            coupler_tid: Some(coupler_tid),
+                            start: false,
                         }
                     }
                     HotLocationKind::Counting(_) => {
